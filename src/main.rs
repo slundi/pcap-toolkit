@@ -252,7 +252,7 @@ fn build_transform(args: &cli::SortArgs) -> Result<TransformOptions> {
     Ok(t)
 }
 
-fn cmd_export(args: &cli::ExportArgs) -> Result<()> {
+fn cmd_export(args: &crate::cli::export::ExportArgs) -> Result<()> {
     let filter = build_export_filter(args)?;
 
     let bpf_filter = args
@@ -306,7 +306,7 @@ fn cmd_export(args: &cli::ExportArgs) -> Result<()> {
 }
 
 /// Build a [`Filter`] from the `export` subcommand CLI arguments.
-fn build_export_filter(args: &cli::ExportArgs) -> Result<Filter> {
+fn build_export_filter(args: &crate::cli::export::ExportArgs) -> Result<Filter> {
     let mut f = Filter {
         unidirectional: args.unidirectional,
         negate: args.negate,
@@ -374,7 +374,7 @@ fn build_export_filter(args: &cli::ExportArgs) -> Result<Filter> {
     Ok(f)
 }
 
-fn cmd_replay(args: &cli::ReplayArgs) -> Result<()> {
+fn cmd_replay(args: &crate::cli::replay::ReplayArgs) -> Result<()> {
     if args.speed.is_some() && args.pps.is_some() {
         anyhow::bail!("--speed and --pps are mutually exclusive; use one or the other");
     }
@@ -419,7 +419,7 @@ fn cmd_replay(args: &cli::ReplayArgs) -> Result<()> {
 }
 
 /// Build a [`Filter`] from the `replay` subcommand CLI arguments.
-fn build_replay_filter(args: &cli::ReplayArgs) -> Result<Filter> {
+fn build_replay_filter(args: &crate::cli::replay::ReplayArgs) -> Result<Filter> {
     let mut f = Filter {
         unidirectional: args.unidirectional,
         negate: args.negate,
