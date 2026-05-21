@@ -3,13 +3,16 @@
 //! Reads a PCAP file, applies optional filters, and writes each packet as a
 //! typed record to the requested format.
 //!
-//! ## Pipeline
+//! ## Pipeline (7.3 channel-based)
 //!
-//! 1. Stream packets from the PCAP file via [`crate::pcap::open_with_payload`].
-//! 2. For each packet, build a [`PacketMeta`] and apply structured + BPF
-//!    filters (same logic as the sort second pass).
-//! 3. Construct a [`PacketRecord`] with all parsed layer fields.
-//! 4. Accumulate records and dispatch to the format-specific writer.
+//! 1. A **producer thread** streams packets from the PCAP file, applies
+//!    structured + BPF filters, and sends [`PacketRecord`]s through a bounded
+//!    [`std::sync::mpsc::sync_channel`].
+//! 2. The **main thread** receives records and writes them to a
+//!    format-specific [`PacketSink`] (JSON, Parquet, or Avro).
+//!
+//! Decoupling I/O (producer) from serialisation (consumer) lets both stages
+//! run concurrently, improving throughput for CPU-bound formats.
 
 pub mod avro;
 pub mod json;
@@ -22,6 +25,26 @@ use crate::bpf::BpfExpr;
 use crate::error::ExportError;
 use crate::filter::{Filter, PacketMeta};
 use crate::pcap;
+
+// ── PacketSink trait ──────────────────────────────────────────────────────────
+
+/// Common interface for streaming packet writers.
+///
+/// Each format (JSON, Parquet, Avro) provides its own implementation.
+/// Records are pushed one at a time via [`write`]; [`close`] flushes any
+/// internal buffer and returns the total packet count.
+pub trait PacketSink {
+    /// Write a single packet record to the output.
+    fn write(&mut self, record: PacketRecord) -> Result<(), ExportError>;
+
+    /// Flush all buffered data and finalise the output file.
+    ///
+    /// Returns the total number of records written.
+    fn close(&mut self) -> Result<u64, ExportError>;
+}
+
+/// Channel capacity for the producer → consumer bounded channel.
+const CHANNEL_CAPACITY: usize = 4096;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -116,6 +139,9 @@ pub struct PacketRecord {
 
 /// Export all packets from `input` to the format specified in `opts`.
 ///
+/// Uses a bounded channel to decouple the PCAP reader (producer thread) from
+/// the format serialiser (main thread), allowing both to run concurrently.
+///
 /// # Errors
 /// Returns [`ExportError`] on I/O failure, format detection failure, or
 /// serialisation error.
@@ -133,50 +159,64 @@ pub fn export_file(input: &Path, opts: &ExportOptions) -> Result<ExportReport, E
             )
         })?;
 
-    let has_filter = !opts.filter.is_empty() || opts.bpf_filter.is_some();
+    let mut sink: Box<dyn PacketSink> = match format {
+        ExportFormat::Json => {
+            Box::new(json::JsonSink::create(&opts.output, opts.compress_payload)?)
+        }
+        ExportFormat::Parquet => Box::new(parquet::ParquetSink::create(
+            &opts.output,
+            opts.compress_payload,
+        )?),
+        ExportFormat::Avro => {
+            Box::new(avro::AvroSink::create(&opts.output, opts.compress_payload)?)
+        }
+    };
 
-    let mut records: Vec<PacketRecord> = Vec::new();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<PacketRecord>(CHANNEL_CAPACITY);
 
-    for item in pcap::open_with_payload(input).map_err(|e| ExportError::Parse(e.to_string()))? {
-        let packet = item.map_err(|e| ExportError::Parse(e.to_string()))?;
+    // Producer: reads PCAP, applies filters, sends PacketRecords.
+    let input_owned = input.to_owned();
+    let filter = opts.filter.clone();
+    let bpf_filter = opts.bpf_filter.clone();
+    let unidirectional = opts.unidirectional;
 
-        let meta = PacketMeta::from_packet(
-            packet.info.timestamp_ns,
-            packet.info.captured_len,
-            &packet.data,
-        );
-
-        if has_filter {
-            let structured_pass = opts.filter.is_empty() || opts.filter.matches(&meta);
-            let bpf_pass = opts
-                .bpf_filter
-                .as_ref()
-                .map(|b| b.eval(&meta))
-                .unwrap_or(true);
-            if !structured_pass || !bpf_pass {
-                continue;
+    let producer = std::thread::spawn(move || -> Result<(), ExportError> {
+        let has_filter = !filter.is_empty() || bpf_filter.is_some();
+        for item in
+            pcap::open_with_payload(&input_owned).map_err(|e| ExportError::Parse(e.to_string()))?
+        {
+            let packet = item.map_err(|e| ExportError::Parse(e.to_string()))?;
+            let meta = PacketMeta::from_packet(
+                packet.info.timestamp_ns,
+                packet.info.captured_len,
+                &packet.data,
+            );
+            if has_filter {
+                let ok = (filter.is_empty() || filter.matches(&meta))
+                    && bpf_filter.as_ref().is_none_or(|b| b.eval(&meta));
+                if !ok {
+                    continue;
+                }
+            }
+            let record = build_record(&packet, &meta, unidirectional);
+            if tx.send(record).is_err() {
+                // Consumer dropped the receiver due to a write error; stop producing.
+                break;
             }
         }
+        Ok(())
+    });
 
-        records.push(build_record(&packet, &meta, opts.unidirectional));
+    // Consumer: receive records and write to sink.
+    for record in rx {
+        sink.write(record)?;
     }
+    let packets_written = sink.close()?;
 
-    let count = records.len();
-
-    match format {
-        ExportFormat::Json => {
-            json::write_jsonl(&opts.output, &records, opts.compress_payload)?;
-        }
-        ExportFormat::Parquet => {
-            parquet::write_parquet(&opts.output, &records, opts.compress_payload)?;
-        }
-        ExportFormat::Avro => {
-            avro::write_avro(&opts.output, &records, opts.compress_payload)?;
-        }
-    }
+    producer.join().map_err(|_| ExportError::ThreadPanic)??;
 
     Ok(ExportReport {
-        packets_written: count as u64,
+        packets_written,
         output_path: opts.output.clone(),
     })
 }

@@ -118,6 +118,10 @@ fn print_flows(info: &CaptureInfo) {
 }
 
 fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
+    if args.inputs.is_empty() {
+        anyhow::bail!("sort requires at least one input file");
+    }
+
     let slice_secs = args
         .slice
         .as_deref()
@@ -146,8 +150,10 @@ fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
         transform,
     };
 
-    let report = sort::sort_file(&args.input, &opts)
-        .with_context(|| format!("failed to sort {}", args.input.display()))?;
+    let input_paths: Vec<&std::path::Path> = args.inputs.iter().map(|p| p.as_path()).collect();
+
+    let report =
+        sort::sort_files(&input_paths, &opts).with_context(|| "failed to sort input file(s)")?;
 
     println!(
         "Sorted {} packet(s) into {} file(s):",

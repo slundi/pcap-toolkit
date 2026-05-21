@@ -55,6 +55,19 @@ impl PacketIndex {
     }
 }
 
+// ── FilePacketIndex ──────────────────────────────────────────────────────────
+
+/// A [`PacketIndex`] entry annotated with the index of its source file.
+///
+/// Used in the multi-file merge path so the second pass can seek into the
+/// correct input file for each packet.
+#[derive(Debug, Clone, Copy)]
+pub struct FilePacketIndex {
+    pub entry: PacketIndex,
+    /// Index into the `inputs` slice passed to [`crate::sort::sort_files`].
+    pub file_id: usize,
+}
+
 // ── IndexStore ───────────────────────────────────────────────────────────────
 
 /// Storage backend for the first-pass packet index.

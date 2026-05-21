@@ -39,7 +39,7 @@ use parquet::schema::types::Type;
 
 use crate::error::ExportError;
 
-use super::PacketRecord;
+use super::{PacketRecord, PacketSink};
 
 /// Number of packets per Parquet row group.
 const BATCH_SIZE: usize = 4096;
@@ -60,43 +60,75 @@ message schema {
 }
 ";
 
-/// Write `records` to a Parquet file at `path`.
+// ── Streaming sink ────────────────────────────────────────────────────────────
+
+/// Streaming Parquet writer that implements [`PacketSink`].
 ///
-/// Packets are flushed as row groups of up to [`BATCH_SIZE`] rows.
-/// When `compress_payload` is `true` all columns use ZSTD compression.
-pub fn write_parquet(
-    path: &Path,
-    records: &[PacketRecord],
-    compress_payload: bool,
-) -> Result<usize, ExportError> {
-    let schema: Arc<Type> =
-        Arc::new(parse_message_type(SCHEMA_STR).map_err(|e| ExportError::Parquet(e.to_string()))?);
+/// Records are accumulated into an internal buffer; a row group is flushed
+/// every [`BATCH_SIZE`] records. The remaining records are flushed on
+/// [`PacketSink::close`].
+pub struct ParquetSink {
+    writer: Option<SerializedFileWriter<std::fs::File>>,
+    buffer: Vec<PacketRecord>,
+    count: u64,
+}
 
-    let compression = if compress_payload {
-        Compression::ZSTD(ZstdLevel::try_new(3).map_err(|e| ExportError::Parquet(e.to_string()))?)
-    } else {
-        Compression::SNAPPY
-    };
+impl ParquetSink {
+    /// Create a new `ParquetSink` writing to `path`.
+    pub fn create(path: &Path, compress_payload: bool) -> Result<Self, ExportError> {
+        let schema: Arc<Type> = Arc::new(
+            parse_message_type(SCHEMA_STR).map_err(|e| ExportError::Parquet(e.to_string()))?,
+        );
+        let compression = if compress_payload {
+            Compression::ZSTD(
+                ZstdLevel::try_new(3).map_err(|e| ExportError::Parquet(e.to_string()))?,
+            )
+        } else {
+            Compression::SNAPPY
+        };
+        let props = Arc::new(
+            WriterProperties::builder()
+                .set_compression(compression)
+                .build(),
+        );
+        let file = std::fs::File::create(path)?;
+        let writer = SerializedFileWriter::new(file, schema, props)
+            .map_err(|e| ExportError::Parquet(e.to_string()))?;
+        Ok(Self {
+            writer: Some(writer),
+            buffer: Vec::with_capacity(BATCH_SIZE),
+            count: 0,
+        })
+    }
+}
 
-    let props = Arc::new(
-        WriterProperties::builder()
-            .set_compression(compression)
-            .build(),
-    );
-
-    let file = std::fs::File::create(path)?;
-    let mut writer = SerializedFileWriter::new(file, schema, props)
-        .map_err(|e| ExportError::Parquet(e.to_string()))?;
-
-    for chunk in records.chunks(BATCH_SIZE) {
-        write_row_group(&mut writer, chunk)?;
+impl PacketSink for ParquetSink {
+    fn write(&mut self, record: PacketRecord) -> Result<(), ExportError> {
+        self.buffer.push(record);
+        self.count += 1;
+        if self.buffer.len() >= BATCH_SIZE {
+            let batch = std::mem::take(&mut self.buffer);
+            if let Some(ref mut w) = self.writer {
+                write_row_group(w, &batch)?;
+            }
+        }
+        Ok(())
     }
 
-    writer
-        .close()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?;
-
-    Ok(records.len())
+    fn close(&mut self) -> Result<u64, ExportError> {
+        if !self.buffer.is_empty() {
+            let batch = std::mem::take(&mut self.buffer);
+            if let Some(ref mut w) = self.writer {
+                write_row_group(w, &batch)?;
+            }
+        }
+        if let Some(writer) = self.writer.take() {
+            writer
+                .close()
+                .map_err(|e| ExportError::Parquet(e.to_string()))?;
+        }
+        Ok(self.count)
+    }
 }
 
 /// Write one row group from a slice of records.

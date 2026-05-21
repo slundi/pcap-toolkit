@@ -7,13 +7,14 @@
 //! before Base64 encoding, reducing storage for large payloads.
 
 use std::io::{BufWriter, Write};
+use std::path::Path;
 
 use base64::Engine as _;
 use serde::Serialize;
 
 use crate::error::ExportError;
 
-use super::PacketRecord;
+use super::{PacketRecord, PacketSink};
 
 // ── Serialisable record ───────────────────────────────────────────────────────
 
@@ -44,42 +45,50 @@ struct JsonPacket<'a> {
     payload_encoding: Option<&'static str>,
 }
 
-// ── Writer ────────────────────────────────────────────────────────────────────
+// ── Streaming sink ────────────────────────────────────────────────────────────
 
-/// Write `records` to `path` as JSONL (one JSON object per line).
+/// Streaming JSONL writer that implements [`PacketSink`].
 ///
-/// When `compress_payload` is `true` each payload is Zstd-compressed before
-/// Base64 encoding and the field `payload_encoding` is set to `"zstd+base64"`.
-pub fn write_jsonl(
-    path: &std::path::Path,
-    records: &[PacketRecord],
+/// Each [`PacketSink::write`] call serialises one packet record immediately
+/// without buffering all records in memory first.
+pub struct JsonSink {
+    out: BufWriter<std::fs::File>,
     compress_payload: bool,
-) -> Result<usize, ExportError> {
-    let file = std::fs::File::create(path)?;
-    let mut out = BufWriter::new(file);
-    let b64 = base64::engine::general_purpose::STANDARD;
+    count: u64,
+    b64: base64::engine::general_purpose::GeneralPurpose,
+}
 
-    let src_ip_strs: Vec<Option<String>> = records
-        .iter()
-        .map(|r| r.src_ip.map(|ip| ip.to_string()))
-        .collect();
-    let dst_ip_strs: Vec<Option<String>> = records
-        .iter()
-        .map(|r| r.dst_ip.map(|ip| ip.to_string()))
-        .collect();
+impl JsonSink {
+    /// Create a new `JsonSink` writing to `path`.
+    ///
+    /// Uses a 64 KiB write buffer to reduce syscall overhead.
+    pub fn create(path: &Path, compress_payload: bool) -> Result<Self, ExportError> {
+        let file = std::fs::File::create(path)?;
+        Ok(Self {
+            out: BufWriter::with_capacity(64 * 1024, file),
+            compress_payload,
+            count: 0,
+            b64: base64::engine::general_purpose::STANDARD,
+        })
+    }
+}
 
-    for (i, record) in records.iter().enumerate() {
+impl PacketSink for JsonSink {
+    fn write(&mut self, record: PacketRecord) -> Result<(), ExportError> {
+        let src_ip_str = record.src_ip.map(|ip| ip.to_string());
+        let dst_ip_str = record.dst_ip.map(|ip| ip.to_string());
+
         let payload_encoded = if record.payload.is_empty() {
             None
-        } else if compress_payload {
+        } else if self.compress_payload {
             let compressed =
                 zstd::encode_all(record.payload.as_slice(), 3).map_err(ExportError::Io)?;
-            Some(b64.encode(&compressed))
+            Some(self.b64.encode(&compressed))
         } else {
-            Some(b64.encode(&record.payload))
+            Some(self.b64.encode(&record.payload))
         };
 
-        let encoding = if compress_payload && payload_encoded.is_some() {
+        let encoding = if self.compress_payload && payload_encoded.is_some() {
             Some("zstd+base64")
         } else if payload_encoded.is_some() {
             Some("base64")
@@ -89,8 +98,8 @@ pub fn write_jsonl(
 
         let json_rec = JsonPacket {
             timestamp_ns: record.timestamp_ns,
-            src_ip: src_ip_strs[i].as_deref(),
-            dst_ip: dst_ip_strs[i].as_deref(),
+            src_ip: src_ip_str.as_deref(),
+            dst_ip: dst_ip_str.as_deref(),
             src_port: record.src_port,
             dst_port: record.dst_port,
             protocol: record.protocol,
@@ -102,10 +111,15 @@ pub fn write_jsonl(
             payload_encoding: encoding,
         };
 
-        serde_json::to_writer(&mut out, &json_rec).map_err(|e| ExportError::Json(e.to_string()))?;
-        out.write_all(b"\n")?;
+        serde_json::to_writer(&mut self.out, &json_rec)
+            .map_err(|e| ExportError::Json(e.to_string()))?;
+        self.out.write_all(b"\n")?;
+        self.count += 1;
+        Ok(())
     }
 
-    out.flush()?;
-    Ok(records.len())
+    fn close(&mut self) -> Result<u64, ExportError> {
+        self.out.flush()?;
+        Ok(self.count)
+    }
 }

@@ -7,7 +7,7 @@ use pcap_toolkit::bpf;
 use pcap_toolkit::export::{ExportFormat, ExportOptions, export_file};
 use pcap_toolkit::filter::{Filter, FilterRule, IpNet, Op, PortRange};
 use pcap_toolkit::flow::FlowKey;
-use pcap_toolkit::sort::{SortOptions, parse_slice, sort_file};
+use pcap_toolkit::sort::{SortOptions, parse_slice, sort_file, sort_files};
 use pcap_toolkit::transform::{TransformOptions, parse_ip_mapping};
 
 // ── PCAP builder helpers ─────────────────────────────────────────────────────
@@ -728,6 +728,141 @@ fn test_parse_slice_values() {
     assert_eq!(parse_slice("60s").unwrap(), 60);
     assert_eq!(parse_slice("300").unwrap(), 300);
     assert!(parse_slice("bad").is_err());
+}
+
+// ── Multi-file parallel sort tests (7.2) ─────────────────────────────────────
+
+#[test]
+fn test_sort_files_merges_two_files_in_timestamp_order() {
+    // File A: packets at T=1s, T=3s, T=5s
+    // File B: packets at T=2s, T=4s, T=6s
+    // Expected merged output: T=1,2,3,4,5,6
+    let make_payload = |id: u8| vec![id; 40];
+    let pcap_a = build_pcap(&[
+        (1, 0, make_payload(0x01)),
+        (3, 0, make_payload(0x03)),
+        (5, 0, make_payload(0x05)),
+    ]);
+    let pcap_b = build_pcap(&[
+        (2, 0, make_payload(0x02)),
+        (4, 0, make_payload(0x04)),
+        (6, 0, make_payload(0x06)),
+    ]);
+
+    let input_a = write_tmp_pcap("sort_files_a.pcap", &pcap_a);
+    let input_b = write_tmp_pcap("sort_files_b.pcap", &pcap_b);
+    let output = std::env::temp_dir().join("sort_files_merged.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        ..SortOptions::default()
+    };
+    let report = sort_files(&[input_a.as_path(), input_b.as_path()], &opts).unwrap();
+
+    assert_eq!(report.packets_written, 6);
+    assert_eq!(report.files_written.len(), 1);
+
+    let out_bytes = std::fs::read(&output).unwrap();
+    // Verify the first packet has ts_sec = 1.
+    let first_ts = u32::from_le_bytes(out_bytes[24..28].try_into().unwrap());
+    assert_eq!(first_ts, 1);
+    // Verify the last packet's ts_sec.  Offset: 24 + 5*(16+40) = 24 + 280 = 304
+    let last_pkt_off = 24 + 5 * (16 + 40);
+    let last_ts = u32::from_le_bytes(
+        out_bytes[last_pkt_off..last_pkt_off + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(last_ts, 6);
+
+    let _ = std::fs::remove_file(&input_a);
+    let _ = std::fs::remove_file(&input_b);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_sort_files_single_input_matches_sort_file() {
+    // sort_files with one input must produce the same result as sort_file.
+    let payload = vec![0xBBu8; 30];
+    let pcap_data = build_pcap(&[
+        (5, 0, payload.clone()),
+        (2, 0, payload.clone()),
+        (8, 0, payload.clone()),
+    ]);
+    let input = write_tmp_pcap("sort_files_single.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("sort_files_single_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        ..SortOptions::default()
+    };
+    let report = sort_files(&[input.as_path()], &opts).unwrap();
+    assert_eq!(report.packets_written, 3);
+
+    let out_bytes = std::fs::read(&output).unwrap();
+    let first_ts = u32::from_le_bytes(out_bytes[24..28].try_into().unwrap());
+    assert_eq!(first_ts, 2);
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+// ── First-pass pre-filter tests (7.4) ────────────────────────────────────────
+
+#[test]
+fn test_first_pass_prefilter_reduces_output_count() {
+    // Pre-filter: TCP only. Two TCP packets + one UDP packet.
+    // The UDP packet should be skipped at index time (first pass) and
+    // never appear in the output.
+    let tcp_frame = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 1234, 80, 0x02, &[0u8; 4]);
+    let udp_frame = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 1234, 53, &[0u8; 4]);
+
+    let pcap_data = build_pcap(&[
+        (1, 0, tcp_frame.clone()),
+        (2, 0, udp_frame),
+        (3, 0, tcp_frame),
+    ]);
+    let input = write_tmp_pcap("prefilter_proto_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("prefilter_proto_out.pcap");
+
+    let mut filter = Filter::default();
+    filter.protocols = vec![6]; // TCP only
+
+    let opts = SortOptions {
+        output: output.clone(),
+        filter,
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(report.packets_written, 2, "only TCP packets should appear");
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_first_pass_prefilter_with_bpf() {
+    // BPF filter: "dst port 443". Three packets: two TCP/443, one TCP/80.
+    let tcp443 = eth_ipv4_tcp([10, 0, 0, 1], [8, 8, 8, 8], 5000, 443, 0x02, &[0u8; 4]);
+    let tcp80 = eth_ipv4_tcp([10, 0, 0, 1], [8, 8, 8, 8], 5001, 80, 0x02, &[0u8; 4]);
+
+    let pcap_data = build_pcap(&[(1, 0, tcp443.clone()), (2, 0, tcp80), (3, 0, tcp443)]);
+    let input = write_tmp_pcap("prefilter_bpf_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("prefilter_bpf_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        bpf_filter: Some(bpf::parse("dst port 443").unwrap()),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 2,
+        "only dst-port-443 packets should appear"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
 }
 
 // ── Export integration tests ──────────────────────────────────────────────────

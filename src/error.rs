@@ -57,6 +57,9 @@ pub enum ExportError {
 
     #[error("unsupported export format '{0}': expected json, parquet, or avro")]
     UnknownFormat(String),
+
+    #[error("export producer thread panicked unexpectedly")]
+    ThreadPanic,
 }
 
 /// Errors produced by the live replay engine.
@@ -92,4 +95,14 @@ pub enum SortError {
 
     #[error("invalid slice duration '{0}': expected e.g. '1h', '30m', '1d', or seconds")]
     InvalidSlice(String),
+
+    #[error(
+        "incompatible link types: first file uses {first}, \
+         file '{path}' uses {found} — all inputs must share the same link type"
+    )]
+    IncompatibleLinkType {
+        path: std::path::PathBuf,
+        first: i32,
+        found: i32,
+    },
 }

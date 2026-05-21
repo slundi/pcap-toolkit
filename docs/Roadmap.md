@@ -167,9 +167,9 @@ Send a (possibly filtered, modified, sorted, or time-shifted) capture onto a rea
 ## Phase 7: Performance & Scale
 
 - [ ] 7.1 Benchmark against `tcpreplay` / `tshark` on large datasets (1 GB, 10 GB, 100 GB).
-- [ ] 7.2 Parallelise the first-pass index build across multiple input files using `Rayon`.
-- [ ] 7.3 Evaluate SPSC (single-producer / multi-consumer) channel between the reader and export workers to maximise throughput on multi-core systems.
-- [ ] 7.4 First-pass pre-filter: skip indexing packets that cannot match active structured filters (protocol, IP, port checks are cheap at index time).
+- [x] 7.2 Parallelise the first-pass index build across multiple input files using `Rayon`.
+- [x] 7.3 Channel-based streaming export: `PacketSink` trait + `JsonSink`/`ParquetSink`/`AvroSink`; producer thread reads and filters PCAP, main thread serialises via bounded `sync_channel`; eliminates `Vec<PacketRecord>` accumulator.
+- [x] 7.4 First-pass pre-filter: skip indexing packets that cannot match active structured filters (protocol, IP, port checks are cheap at index time).
 - [ ] 7.5 Profile and optimise hot paths with `perf` / `flamegraph` before committing to any architectural change.
 
 ## Ideas & Future Work

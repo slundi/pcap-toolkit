@@ -19,12 +19,13 @@ use std::path::{Path, PathBuf};
 
 use pcap_parser::traits::PcapReaderIterator;
 use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError};
+use rayon::prelude::*;
 
 use crate::bpf::BpfExpr;
 use crate::error::SortError;
 use crate::filter::{Filter, PacketMeta};
 use crate::transform::{self, TransformOptions};
-use index::{IndexStore, PacketIndex, read_packet_at, sidecar_path};
+use index::{FilePacketIndex, IndexStore, PacketIndex, read_packet_at, sidecar_path};
 use writer::{GlobalHeader, SlicedWriter};
 
 const BUF_SIZE: usize = 65536;
@@ -61,27 +62,82 @@ pub struct SortReport {
 
 /// Sort `input` chronologically and write the result according to `opts`.
 ///
+/// Thin wrapper around [`sort_files`] for the common single-input case.
+///
 /// PCAPng input is not yet supported and returns [`SortError::PcapNgNotSupported`].
 ///
 /// # Errors
 /// Returns [`SortError`] on I/O failure, unsupported input format, or
 /// invalid slice specification.
 pub fn sort_file(input: &Path, opts: &SortOptions) -> Result<SortReport, SortError> {
-    let (global_hdr, store) = first_pass(input, opts.on_disk)?;
+    sort_files(&[input], opts)
+}
 
-    // Remember the sidecar path before consuming `store`.
-    let sidecar = store.sidecar_path().map(Path::to_owned);
-
-    let sorted_index = store.into_sorted()?;
-
-    let report = second_pass(input, global_hdr, &sorted_index, opts)?;
-
-    // Remove the sidecar file now that sorting is complete.
-    if let Some(ref p) = sidecar {
-        let _ = std::fs::remove_file(p);
+/// Sort and merge one or more input files chronologically.
+///
+/// First passes are run in **parallel** across all inputs using Rayon; the
+/// resulting per-file indexes are merged and sorted by timestamp before a
+/// single sequential second pass writes the output.
+///
+/// All input files must share the same link-layer type; if they differ
+/// [`SortError::IncompatibleLinkType`] is returned.
+///
+/// # Errors
+/// Returns [`SortError`] on I/O failure, unsupported input format,
+/// incompatible link types, or invalid slice specification.
+pub fn sort_files(inputs: &[&Path], opts: &SortOptions) -> Result<SortReport, SortError> {
+    if inputs.is_empty() {
+        return Ok(SortReport {
+            packets_written: 0,
+            files_written: vec![],
+        });
     }
 
-    Ok(report)
+    // ── Parallel first pass ───────────────────────────────────────────────
+    let results: Vec<Result<(GlobalHeader, IndexStore), SortError>> = inputs
+        .par_iter()
+        .map(|p| first_pass(p, opts.on_disk, &opts.filter, opts.bpf_filter.as_ref()))
+        .collect();
+
+    let mut headers_and_stores: Vec<(GlobalHeader, IndexStore)> = Vec::with_capacity(inputs.len());
+    for r in results {
+        headers_and_stores.push(r?);
+    }
+
+    // ── Link-type compatibility check ─────────────────────────────────────
+    let reference_hdr = headers_and_stores[0].0;
+    for (i, (hdr, _)) in headers_and_stores.iter().enumerate().skip(1) {
+        if hdr.network != reference_hdr.network {
+            // Clean up any on-disk sidecar files before returning.
+            for (_, store) in &headers_and_stores {
+                if let Some(p) = store.sidecar_path() {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+            return Err(SortError::IncompatibleLinkType {
+                path: inputs[i].to_owned(),
+                first: reference_hdr.network,
+                found: hdr.network,
+            });
+        }
+    }
+
+    // ── Merge per-file indexes ────────────────────────────────────────────
+    let mut merged: Vec<FilePacketIndex> = Vec::new();
+    for (file_id, (_, store)) in headers_and_stores.into_iter().enumerate() {
+        let sidecar = store.sidecar_path().map(Path::to_owned);
+        let entries = store.into_sorted()?;
+        for entry in entries {
+            merged.push(FilePacketIndex { entry, file_id });
+        }
+        if let Some(ref p) = sidecar {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    merged.sort_unstable_by_key(|e| e.entry.timestamp_ns);
+
+    second_pass_multi(inputs, reference_hdr, &merged, opts)
 }
 
 /// Parse a human-readable slice duration string into seconds.
@@ -121,14 +177,18 @@ pub fn parse_slice(s: &str) -> Result<u64, SortError> {
 
 // ── First pass ───────────────────────────────────────────────────────────────
 
-/// Scan the input file to build the packet index and capture the global header.
+/// Scan a single input file to build its packet index and capture the global header.
 ///
-/// Returns `(GlobalHeader, IndexStore)`.
-fn first_pass(input: &Path, on_disk: bool) -> Result<(GlobalHeader, IndexStore), SortError> {
-    // Detect format before opening the streaming reader.
+/// When `filter` / `bpf` are active (7.4 pre-filter) packets that cannot
+/// match are skipped from the index entirely, reducing second-pass seeks.
+fn first_pass(
+    input: &Path,
+    on_disk: bool,
+    filter: &Filter,
+    bpf: Option<&BpfExpr>,
+) -> Result<(GlobalHeader, IndexStore), SortError> {
     let magic = read_magic(input)?;
-    let u32_magic = u32::from_le_bytes(magic);
-    if u32_magic == 0x0a0d_0d0a {
+    if u32::from_le_bytes(magic) == 0x0a0d_0d0a {
         return Err(SortError::PcapNgNotSupported);
     }
 
@@ -142,16 +202,18 @@ fn first_pass(input: &Path, on_disk: bool) -> Result<(GlobalHeader, IndexStore),
         IndexStore::memory()
     };
 
-    first_pass_inner(&mut reader, store)
+    first_pass_inner(&mut reader, store, filter, bpf)
 }
 
 fn first_pass_inner<R: std::io::Read>(
     reader: &mut LegacyPcapReader<R>,
     mut store: IndexStore,
+    filter: &Filter,
+    bpf: Option<&BpfExpr>,
 ) -> Result<(GlobalHeader, IndexStore), SortError> {
     let mut global_hdr: Option<GlobalHeader> = None;
-    // Byte offset tracking: starts at 0 and advances by each consumed block.
     let mut file_offset: u64 = 0;
+    let has_filter = !filter.is_empty() || bpf.is_some();
 
     loop {
         match reader.next() {
@@ -181,11 +243,24 @@ fn first_pass_inner<R: std::io::Read>(
                             u64::from(pkt.ts_sec) * 1_000_000_000 + u64::from(pkt.ts_usec) * 1_000
                         };
 
-                        store.push(PacketIndex {
-                            timestamp_ns,
-                            byte_offset: file_offset,
-                            caplen: pkt.caplen,
-                        })?;
+                        // 7.4 pre-filter: skip packets that cannot match the
+                        // active filter, avoiding unnecessary second-pass seeks.
+                        let should_index = if has_filter {
+                            let meta = PacketMeta::from_packet(timestamp_ns, pkt.caplen, pkt.data);
+                            let structured = filter.is_empty() || filter.matches(&meta);
+                            let bpf_ok = bpf.is_none_or(|b| b.eval(&meta));
+                            structured && bpf_ok
+                        } else {
+                            true
+                        };
+
+                        if should_index {
+                            store.push(PacketIndex {
+                                timestamp_ns,
+                                byte_offset: file_offset,
+                                caplen: pkt.caplen,
+                            })?;
+                        }
 
                         file_offset += consumed as u64;
                     }
@@ -209,37 +284,47 @@ fn first_pass_inner<R: std::io::Read>(
     Ok((hdr, store))
 }
 
-// ── Second pass ──────────────────────────────────────────────────────────────
+// ── Second pass ───────────────────────────────────────────────────────────────
 
-fn second_pass(
-    input: &Path,
+/// Multi-file second pass: open all source files, seek-and-stream packets in
+/// sorted order, apply transforms, and write output.
+fn second_pass_multi(
+    inputs: &[&Path],
     header: GlobalHeader,
-    sorted: &[PacketIndex],
+    sorted: &[FilePacketIndex],
     opts: &SortOptions,
 ) -> Result<SortReport, SortError> {
-    let mut src = File::open(input)?;
-    let big_endian = header.is_big_endian();
+    let mut src_files: Vec<File> = inputs
+        .iter()
+        .map(|p| File::open(p).map_err(SortError::Io))
+        .collect::<Result<_, _>>()?;
 
+    let big_endian = header.is_big_endian();
     let mut writer = SlicedWriter::new(opts.output.clone(), header, opts.slice_secs);
 
-    // Pre-compute the timestamp delta once from the first sorted packet.
     let ts_delta: i64 = if let Some(target_ns) = opts.transform.timestamp_start_ns {
         sorted
             .first()
-            .map(|p| target_ns as i64 - p.timestamp_ns as i64)
+            .map(|p| target_ns as i64 - p.entry.timestamp_ns as i64)
             .unwrap_or(0)
     } else {
         0
     };
     let has_transform = !opts.transform.is_empty();
+    // Second-pass filter is kept for correctness when pre-filter was not
+    // active (no filter) or when the caller bypasses sort_files directly.
     let has_filter = !opts.filter.is_empty() || opts.bpf_filter.is_some();
 
     for entry in sorted {
-        let (origlen, mut data) =
-            read_packet_at(&mut src, entry.byte_offset, entry.caplen, big_endian)?;
+        let (origlen, mut data) = read_packet_at(
+            &mut src_files[entry.file_id],
+            entry.entry.byte_offset,
+            entry.entry.caplen,
+            big_endian,
+        )?;
 
         if has_filter {
-            let meta = PacketMeta::from_packet(entry.timestamp_ns, entry.caplen, &data);
+            let meta = PacketMeta::from_packet(entry.entry.timestamp_ns, entry.entry.caplen, &data);
             let structured_pass = opts.filter.is_empty() || opts.filter.matches(&meta);
             let bpf_pass = opts
                 .bpf_filter
@@ -254,13 +339,13 @@ fn second_pass(
         let (ts, caplen, new_origlen) = if has_transform {
             transform::apply(
                 &mut data,
-                entry.timestamp_ns,
+                entry.entry.timestamp_ns,
                 ts_delta,
                 origlen,
                 &opts.transform,
             )
         } else {
-            (entry.timestamp_ns, data.len() as u32, origlen)
+            (entry.entry.timestamp_ns, data.len() as u32, origlen)
         };
 
         writer.write_packet(ts, caplen, new_origlen, &data)?;

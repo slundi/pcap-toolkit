@@ -54,8 +54,8 @@ pub struct StatsArgs {
 /// Arguments for the `sort` subcommand.
 #[derive(Debug, Clone)]
 pub struct SortArgs {
-    /// Input PCAP file.
-    pub input: PathBuf,
+    /// Input PCAP file(s). All files are parallel-indexed then merged.
+    pub inputs: Vec<PathBuf>,
     /// Output file path (no slicing) or directory path (with `--slice`).
     pub output: PathBuf,
     /// Time-slice interval, e.g. `1h`, `30m`, `1d`. Omit for a single file.
@@ -144,7 +144,9 @@ fn stats_cmd() -> impl Parser<Command> {
 }
 
 fn sort_cmd() -> impl Parser<Command> {
-    let input = input_arg();
+    let inputs = positional::<PathBuf>("INPUT")
+        .help("Input PCAP file(s) — at least one required; multiple files are merged")
+        .many();
     let output = long("output")
         .short('o')
         .help("Output file (no slicing) or directory (with --slice)")
@@ -261,7 +263,7 @@ fn sort_cmd() -> impl Parser<Command> {
         max_payload_bytes,
         timestamp_start,
         replace_ip,
-        input,
+        inputs,
     })
     .to_options()
     .descr("Sort a PCAP capture chronologically using two-pass indexing")
