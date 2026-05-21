@@ -51,11 +51,41 @@ pub struct FilterConfig {
     /// IP protocols to keep (e.g. `["tcp", "udp"]`).
     pub proto: Vec<String>,
 
-    /// Destination ports to keep.
-    pub dst_port: Vec<u16>,
-
-    /// Source IPs / CIDRs to keep.
+    /// Source IP addresses / CIDRs to keep (OR-ed).
     pub src_ip: Vec<String>,
+
+    /// Destination IP addresses / CIDRs to keep (OR-ed).
+    pub dst_ip: Vec<String>,
+
+    /// Either-endpoint IP addresses / CIDRs (OR-ed).
+    pub ip: Vec<String>,
+
+    /// Source port or range strings to keep (OR-ed).
+    pub src_port: Vec<String>,
+
+    /// Destination port or range strings to keep (OR-ed).
+    pub dst_port: Vec<String>,
+
+    /// Either-endpoint port or range strings (OR-ed).
+    pub port: Vec<String>,
+
+    /// Hex flow IDs to retain (comma-separated or multiple entries).
+    pub flow_id: Vec<String>,
+
+    /// Retain only packets at or after this datetime (RFC 3339 or ms epoch).
+    pub from: Option<String>,
+
+    /// Retain only packets at or before this datetime (RFC 3339 or ms epoch).
+    pub to: Option<String>,
+
+    /// TCP flags filter string (e.g. `"SYN+ACK"`, `"RST:exact"`).
+    pub tcp_flags: Option<String>,
+
+    /// Minimum captured packet length in bytes.
+    pub min_len: Option<u32>,
+
+    /// Maximum captured packet length in bytes.
+    pub max_len: Option<u32>,
 
     /// Use unidirectional flow IDs (default: bidirectional).
     pub unidirectional: bool,
@@ -139,14 +169,34 @@ impl<'de> Deserialize<'de> for FilterConfig {
     fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
         let mut th = TableHelper::new(value)?;
         let proto = th.optional::<Vec<String>>("proto").unwrap_or_default();
-        let dst_port = th.optional::<Vec<u16>>("dst_port").unwrap_or_default();
         let src_ip = th.optional::<Vec<String>>("src_ip").unwrap_or_default();
+        let dst_ip = th.optional::<Vec<String>>("dst_ip").unwrap_or_default();
+        let ip = th.optional::<Vec<String>>("ip").unwrap_or_default();
+        let src_port = th.optional::<Vec<String>>("src_port").unwrap_or_default();
+        let dst_port = th.optional::<Vec<String>>("dst_port").unwrap_or_default();
+        let port = th.optional::<Vec<String>>("port").unwrap_or_default();
+        let flow_id = th.optional::<Vec<String>>("flow_id").unwrap_or_default();
+        let from = th.optional::<String>("from");
+        let to = th.optional::<String>("to");
+        let tcp_flags = th.optional::<String>("tcp_flags");
+        let min_len = th.optional::<u32>("min_len");
+        let max_len = th.optional::<u32>("max_len");
         let unidirectional = th.optional::<bool>("unidirectional").unwrap_or(false);
         th.finalize(None)?;
         Ok(FilterConfig {
             proto,
-            dst_port,
             src_ip,
+            dst_ip,
+            ip,
+            src_port,
+            dst_port,
+            port,
+            flow_id,
+            from,
+            to,
+            tcp_flags,
+            min_len,
+            max_len,
             unidirectional,
         })
     }
@@ -218,7 +268,7 @@ slice = "1h"
 
 [filter]
 proto = ["tcp", "udp"]
-dst_port = [443, 80]
+dst_port = ["443", "80"]
 src_ip = ["10.0.0.0/8"]
 
 [[output]]
@@ -237,7 +287,7 @@ speed = 2.0
         assert!(config.sort.enabled);
         assert_eq!(config.sort.slice.as_deref(), Some("1h"));
         assert_eq!(config.filter.proto, ["tcp", "udp"]);
-        assert_eq!(config.filter.dst_port, [443, 80]);
+        assert_eq!(config.filter.dst_port, ["443", "80"]);
         assert_eq!(config.output.len(), 1);
         assert_eq!(config.output[0].format, "parquet");
         assert_eq!(config.replay.speed, 2.0);

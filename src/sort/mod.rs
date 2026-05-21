@@ -21,6 +21,7 @@ use pcap_parser::traits::PcapReaderIterator;
 use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError};
 
 use crate::error::SortError;
+use crate::filter::{Filter, PacketMeta};
 use index::{IndexStore, PacketIndex, read_packet_at, sidecar_path};
 use writer::{GlobalHeader, SlicedWriter};
 
@@ -29,7 +30,7 @@ const BUF_SIZE: usize = 65536;
 // ── Public types ─────────────────────────────────────────────────────────────
 
 /// Options for [`sort_file`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SortOptions {
     /// Destination: a file path when no slicing, a directory path when slicing.
     pub output: PathBuf,
@@ -37,6 +38,8 @@ pub struct SortOptions {
     pub slice_secs: Option<u64>,
     /// When `true`, write the index to a `.idx` sidecar file instead of RAM.
     pub on_disk: bool,
+    /// Packet filter applied during the second pass. Default matches all packets.
+    pub filter: Filter,
 }
 
 /// Summary returned by [`sort_file`] on success.
@@ -213,9 +216,16 @@ fn second_pass(
 
     let mut writer = SlicedWriter::new(opts.output.clone(), header, opts.slice_secs);
 
+    let has_filter = !opts.filter.is_empty();
     for entry in sorted {
         let (origlen, data) =
             read_packet_at(&mut src, entry.byte_offset, entry.caplen, big_endian)?;
+        if has_filter {
+            let meta = PacketMeta::from_packet(entry.timestamp_ns, entry.caplen, &data);
+            if !opts.filter.matches(&meta) {
+                continue;
+            }
+        }
         writer.write_packet(entry.timestamp_ns, entry.caplen, origlen, &data)?;
     }
 

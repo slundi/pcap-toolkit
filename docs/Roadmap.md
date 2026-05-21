@@ -62,22 +62,22 @@ Filters are evaluated during the second pass, after sorting, before any output o
 
 ### Structured Filters
 
-- [ ] **Protocol**: `--proto tcp,udp,icmp,icmp6,…` — match on IP protocol number or well-known name.
-- [ ] **IP address / CIDR**:
+- [x] **Protocol**: `--proto tcp,udp,icmp,icmp6,…` — match on IP protocol number or well-known name.
+- [x] **IP address / CIDR**:
   - `--src-ip <addr-or-cidr>` — match source IP.
   - `--dst-ip <addr-or-cidr>` — match destination IP.
   - `--ip <addr-or-cidr>` — match either endpoint (logical OR of the above).
   - Accept both exact addresses (`10.0.0.1`, `::1`) and prefix notation (`10.0.0.0/8`, `2001:db8::/32`).
   - IPv4-mapped IPv6 addresses (`::ffff:10.0.0.1`) normalised to IPv4 before matching.
-- [ ] **Port**:
+- [x] **Port**:
   - `--src-port <port-or-range>` — match source port (e.g. `443`, `1024-65535`).
   - `--dst-port <port-or-range>` — match destination port.
   - `--port <port-or-range>` — match either endpoint.
   - Only meaningful for TCP and UDP; silently ignored for other protocols.
-- [ ] **Flow ID**: `--flow-id <hex>` — include only packets belonging to a specific pre-computed flow ID. Accepts one or more comma-separated values for multi-flow extraction.
-- [ ] **Time range**: `--from <datetime>` / `--to <datetime>` — retain only packets whose timestamp falls within the window. Datetimes accepted as RFC 3339 (`2024-01-15T14:30:00Z`) or millisecond epoch integers.
-- [ ] **TCP flags**: `--tcp-flags <mask>` — filter on flag combinations (e.g. `SYN`, `SYN+ACK`, `RST`, `FIN`). Supports `any` (at least one flag set) and `exact` match modes.
-- [ ] **Packet length**: `--min-len <bytes>` / `--max-len <bytes>` — filter on the captured packet length (after any truncation).
+- [x] **Flow ID**: `--flow-id <hex>` — include only packets belonging to a specific pre-computed flow ID. Accepts one or more comma-separated values for multi-flow extraction.
+- [x] **Time range**: `--from <datetime>` / `--to <datetime>` — retain only packets whose timestamp falls within the window. Datetimes accepted as RFC 3339 (`2024-01-15T14:30:00Z`) or millisecond epoch integers.
+- [x] **TCP flags**: `--tcp-flags <mask>` — filter on flag combinations (e.g. `SYN`, `SYN+ACK`, `RST`, `FIN`). Supports `any` (at least one flag set) and `exact` match modes.
+- [x] **Packet length**: `--min-len <bytes>` / `--max-len <bytes>` — filter on the captured packet length (after any truncation).
 
 ### Logical Composition
 

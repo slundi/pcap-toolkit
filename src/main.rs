@@ -5,6 +5,10 @@ mod cli;
 use anyhow::{Context, Result};
 use pcap_toolkit::{
     config::Config,
+    filter::{
+        Filter, IpNet, PortRange, TcpFlagsFilter, parse_datetime_ns, parse_flow_ids,
+        parse_proto_list,
+    },
     pcap,
     sort::{self, SortOptions},
     stats::{CaptureInfo, StatsCollector},
@@ -115,10 +119,13 @@ fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
         .transpose()
         .with_context(|| "invalid --slice value")?;
 
+    let filter = build_filter(args)?;
+
     let opts = SortOptions {
         output: args.output.clone(),
         slice_secs,
         on_disk: args.on_disk,
+        filter,
     };
 
     let report = sort::sort_file(&args.input, &opts)
@@ -133,6 +140,74 @@ fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
         println!("  {}", f.display());
     }
     Ok(())
+}
+
+/// Construct a [`Filter`] from the CLI arguments on the `sort` subcommand.
+fn build_filter(args: &cli::SortArgs) -> Result<Filter> {
+    let mut f = Filter {
+        unidirectional: args.unidirectional,
+        ..Filter::default()
+    };
+
+    if let Some(proto_str) = &args.proto {
+        f.protocols = parse_proto_list(proto_str)
+            .with_context(|| format!("invalid --proto value '{proto_str}'"))?;
+    }
+
+    for s in &args.src_ip {
+        f.src_ips
+            .push(IpNet::parse(s).with_context(|| format!("invalid --src-ip value '{s}'"))?);
+    }
+    for s in &args.dst_ip {
+        f.dst_ips
+            .push(IpNet::parse(s).with_context(|| format!("invalid --dst-ip value '{s}'"))?);
+    }
+    for s in &args.ip {
+        f.ips
+            .push(IpNet::parse(s).with_context(|| format!("invalid --ip value '{s}'"))?);
+    }
+
+    for s in &args.src_port {
+        f.src_ports
+            .push(PortRange::parse(s).with_context(|| format!("invalid --src-port value '{s}'"))?);
+    }
+    for s in &args.dst_port {
+        f.dst_ports
+            .push(PortRange::parse(s).with_context(|| format!("invalid --dst-port value '{s}'"))?);
+    }
+    for s in &args.port {
+        f.ports
+            .push(PortRange::parse(s).with_context(|| format!("invalid --port value '{s}'"))?);
+    }
+
+    if let Some(ids_str) = &args.flow_id {
+        f.flow_ids = parse_flow_ids(ids_str)
+            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?;
+    }
+
+    if let Some(from_str) = &args.from {
+        f.from_ns = Some(
+            parse_datetime_ns(from_str)
+                .with_context(|| format!("invalid --from value '{from_str}'"))?,
+        );
+    }
+    if let Some(to_str) = &args.to {
+        f.to_ns = Some(
+            parse_datetime_ns(to_str).with_context(|| format!("invalid --to value '{to_str}'"))?,
+        );
+    }
+
+    if let Some(flags_str) = &args.tcp_flags {
+        f.tcp_flags = Some(
+            TcpFlagsFilter::parse(flags_str)
+                .with_context(|| format!("invalid --tcp-flags value '{flags_str}'"))?,
+        );
+    }
+
+    f.min_len = args.min_len;
+    f.max_len = args.max_len;
+
+    Ok(f)
 }
 
 fn format_duration(d: chrono::Duration) -> String {

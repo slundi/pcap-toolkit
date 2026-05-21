@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod error;
+pub mod filter;
 pub mod flow;
 pub mod pcap;
 pub mod sort;
