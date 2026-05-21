@@ -8,7 +8,7 @@ the vulnerability before a fix is available.
 Instead, report them privately via one of the following:
 
 - **Codeberg**: use the private security reporting feature (Issues → New Issue → Mark as private)
-- **Email**: [YOUR_EMAIL_HERE]
+- **Email**: slundi@ikmail.com
 
 We will acknowledge your report within **48 hours** and aim to release a fix within
 **14 days** for critical issues. You will be credited in the release notes unless you

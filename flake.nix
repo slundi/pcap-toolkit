@@ -3,7 +3,7 @@
 # * Search Tool: NixOS Package Search
 # * Usage: If you find ripgrep, simply add pkgs.ripgrep to the buildInputs in your flake.nix.
 {
-  description = "Rust Template with automatic pre-commit hooks";
+  description = "A blazing-fast, data-oriented PCAP manipulation, routing, and transformation tool written in Rust";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -27,11 +27,11 @@
         mkhl.direnv
         vadimcn.vscode-lldb
         redhat.vscode-yaml
-        ryanluker.vscode-coverage-gutters
+        # ryanluker.vscode-coverage-gutters
         # Note: If swellaby is not in your nixpkgs channel,
         # you may need to use a community overlay or skip it here.
-        swellaby.vscode-rust-test-adapter
-        vscode-extensions.nefrob.vscode-just-syntax
+        # swellaby.vscode-rust-test-adapter
+        # vscode-extensions.nefrob.vscode-just-syntax
       ];
       # Create a custom VSCodium with these extensions
       custom-codium = pkgs.vscode-with-extensions.override {

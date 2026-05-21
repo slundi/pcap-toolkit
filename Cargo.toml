@@ -1,24 +1,24 @@
 [package]
-name = "MY_PROJECT"
+name = "pcap-toolkit"
 authors = ["Sébastien LUNDI"]
-description = "SHORT DESCRIPTION"
+description = "A blazing-fast, data-oriented PCAP manipulation, routing, and transformation tool written in Rust"
 readme = "README.md"
 license = "Apache-2.0"
-repository = "https://codeberg.org/slundi/MY_PROJECT"
-keywords = []
-categories = []
+repository = "https://codeberg.org/slundi/pcap-toolkit"
+keywords = ["pcap", "network", "packet", "capture", "forensics"]
+categories = ["command-line-utilities", "network-programming", "parser-implementations"]
 version = "0.1.0"
 edition = "2024" # requires Rust >= 1.85 (stable as of Feb 2025)
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-# [lib]
-# name = "MY_PROJECT"
-# path = "src/lib.rs"
+[lib]
+name = "pcap_toolkit"
+path = "src/lib.rs"
 
-# [[bin]]
-# name = "MY_PROJECT"
-# path = "src/main.rs"
+[[bin]]
+name = "pcap-toolkit"
+path = "src/main.rs"
 
 [package.metadata.docs.rs]
 targets = [

@@ -1,5 +1,5 @@
 # --- Variables ---
-binary_name := "MY_PROJECT" # Change this to your project name
+binary_name := "pcap-toolkit"
 
 # --- Development ---
 

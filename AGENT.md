@@ -1,18 +1,12 @@
-# Agent Context: MY_PROJECT
-
-<!--
-  Fill in the sections marked with TODO before using this file with an AI agent.
-  The more context you provide, the better the agent will perform.
--->
+# Agent Context: pcap-toolkit
 
 ## Project Identity
 
-<!-- TODO: Replace this paragraph with a concise description of your project. -->
-**MY_PROJECT** is a cross-platform CLI tool written in Rust. <!-- one-sentence goal -->
+**pcap-toolkit** is a blazing-fast, data-oriented PCAP manipulation, routing, and transformation CLI tool written in Rust. It bridges the gap between network engineering and data science by providing high-performance inspection, sorting, splitting, and export of raw packet captures into modern data pipelines (JSON, Parquet, Avro, Elasticsearch).
 
 - **Primary target**: Linux (x86_64, aarch64); Windows and macOS supported via CI
-- **Type**: <!-- CLI / library / CLI + library -->
-- **Crates.io**: <!-- published / internal only -->
+- **Type**: CLI + library
+- **Crates.io**: internal only (not yet published)
 
 ---
 
@@ -90,7 +84,6 @@ Always use `just` recipes rather than raw `cargo` commands.
 - `unwrap()` is acceptable only in tests and in `main()` for unrecoverable setup errors
 
 ### Error handling
-<!-- TODO: Choose one pattern and delete the others. -->
 - **`anyhow`** for binary/application errors (ergonomic, no custom types needed)
 - **`thiserror`** for library errors (typed, implementors can match on variants)
 - Always use `?` to propagate; never silently discard errors with `let _ =`
@@ -195,13 +188,6 @@ binaries to the Forgejo/GitHub release automatically.
 
 ## Knowledge Base
 
-<!--
-  Add project-specific references here as the project grows. Examples:
-
-  - **Architecture Decision Records**: docs/adr/
-  - **API documentation**: https://docs.rs/MY_PROJECT
-  - **Design doc**: docs/design.md
-  - **External API being wrapped**: link + key quirks
-  - **Known tricky areas**: e.g. "the parser in src/parser.rs is sensitive to
-    input order — see the comment at the top before modifying"
--->
+- **Roadmap**: docs/Roadmap.md
+- **CLI reference**: docs/CLI.md
+- **Nix setup**: docs/Nix.md

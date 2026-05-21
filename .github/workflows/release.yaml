@@ -16,8 +16,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Change this to match your binary name (same as `binary_name` in the justfile)
-  BINARY_NAME: MY_PROJECT
+  BINARY_NAME: pcap-toolkit
 
 jobs:
   build-linux:
