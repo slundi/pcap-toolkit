@@ -46,11 +46,26 @@ pub struct IpMapping {
     pub new: IpAddr,
 }
 
+/// A per-protocol payload truncation rule.
+///
+/// When the packet's IP protocol matches `proto`, the payload is truncated to
+/// at most `max_payload_bytes` bytes. Per-protocol rules take precedence over
+/// the global [`TransformOptions::max_payload_bytes`] limit.
+#[derive(Debug, Clone)]
+pub struct ProtocolTruncation {
+    /// IP protocol number (e.g. `6` = TCP, `17` = UDP).
+    pub proto: u8,
+    /// Maximum payload bytes to keep for this protocol.
+    pub max_payload_bytes: u32,
+}
+
 /// All packet-level transformation options for a sort run.
 #[derive(Debug, Default, Clone)]
 pub struct TransformOptions {
     /// Truncate the payload of each packet to at most this many bytes.
     /// Ethernet, IP, and transport headers are always preserved.
+    ///
+    /// Overridden per-protocol by [`proto_truncation`](Self::proto_truncation).
     pub max_payload_bytes: Option<u32>,
     /// When set, all timestamps are shifted so the first sorted packet starts
     /// at exactly this nanosecond epoch value.
@@ -59,6 +74,12 @@ pub struct TransformOptions {
     pub timestamp_start_ns: Option<u64>,
     /// IP address replacement rules, evaluated in order for every packet.
     pub ip_map: Vec<IpMapping>,
+    /// Per-protocol payload truncation rules (TOML: `[[transform.truncate_by_proto]]`).
+    ///
+    /// The first rule whose `proto` matches the packet's IP protocol is used.
+    /// Falls back to [`max_payload_bytes`](Self::max_payload_bytes) when no
+    /// rule matches.
+    pub proto_truncation: Vec<ProtocolTruncation>,
 }
 
 impl TransformOptions {
@@ -67,6 +88,7 @@ impl TransformOptions {
         self.max_payload_bytes.is_none()
             && self.timestamp_start_ns.is_none()
             && self.ip_map.is_empty()
+            && self.proto_truncation.is_empty()
     }
 }
 
@@ -130,10 +152,9 @@ pub fn apply(
 
     let ip_changed = !opts.ip_map.is_empty() && apply_ip_map(data, &opts.ip_map);
 
-    let (new_origlen, truncated) = if let Some(max_bytes) = opts.max_payload_bytes {
-        do_truncate(data, max_bytes, origlen)
-    } else {
-        (origlen, false)
+    let (new_origlen, truncated) = match effective_truncation_limit(data, opts) {
+        Some(max_bytes) => do_truncate(data, max_bytes, origlen),
+        None => (origlen, false),
     };
 
     if ip_changed || truncated {
@@ -142,6 +163,47 @@ pub fn apply(
 
     let new_caplen = data.len() as u32;
     (new_ts, new_caplen, new_origlen)
+}
+
+// ── Truncation limit resolution ───────────────────────────────────────────────
+
+/// Return the IP protocol number from an Ethernet frame, if parseable.
+fn detect_protocol(data: &[u8]) -> Option<u8> {
+    let (ip_off, et) = find_ip(data)?;
+    match et {
+        ET_IPV4 => {
+            if data.len() >= ip_off + 20 {
+                Some(data[ip_off + 9])
+            } else {
+                None
+            }
+        }
+        ET_IPV6 => {
+            if data.len() >= ip_off + 40 {
+                Some(data[ip_off + 6])
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Determine the effective payload truncation limit for one packet.
+///
+/// Per-protocol rules are checked first; the first matching rule wins.
+/// Falls back to the global `max_payload_bytes` when no rule matches.
+fn effective_truncation_limit(data: &[u8], opts: &TransformOptions) -> Option<u32> {
+    if !opts.proto_truncation.is_empty()
+        && let Some(proto) = detect_protocol(data)
+    {
+        for rule in &opts.proto_truncation {
+            if rule.proto == proto {
+                return Some(rule.max_payload_bytes);
+            }
+        }
+    }
+    opts.max_payload_bytes
 }
 
 // ── Frame navigation ──────────────────────────────────────────────────────────
@@ -766,6 +828,98 @@ mod tests {
         apply(&mut data, 0, 0, orig, &opts);
         // Ethernet(14) + IPv4(20) + UDP(8) = 42
         assert_eq!(data.len(), 42);
+    }
+
+    // ── Per-protocol truncation ───────────────────────────────────────────────
+
+    #[test]
+    fn test_proto_truncation_tcp_uses_rule() {
+        let payload = vec![0xAA; 100];
+        let mut data = eth_ipv4_tcp([1, 2, 3, 4], [5, 6, 7, 8], 100, 443, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            proto_truncation: vec![ProtocolTruncation {
+                proto: PROTO_TCP,
+                max_payload_bytes: 10,
+            }],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        // Ethernet(14) + IPv4(20) + TCP(20) + 10 = 64
+        assert_eq!(data.len(), 64);
+    }
+
+    #[test]
+    fn test_proto_truncation_udp_uses_rule() {
+        let payload = vec![0xBB; 80];
+        let mut data = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 53, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            proto_truncation: vec![ProtocolTruncation {
+                proto: PROTO_UDP,
+                max_payload_bytes: 8,
+            }],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        // Ethernet(14) + IPv4(20) + UDP(8) + 8 = 50
+        assert_eq!(data.len(), 50);
+    }
+
+    #[test]
+    fn test_proto_truncation_overrides_global() {
+        // TCP rule (10 bytes) should win over global limit (50 bytes).
+        let payload = vec![0xCC; 100];
+        let mut data = eth_ipv4_tcp([1, 2, 3, 4], [5, 6, 7, 8], 100, 80, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            max_payload_bytes: Some(50),
+            proto_truncation: vec![ProtocolTruncation {
+                proto: PROTO_TCP,
+                max_payload_bytes: 10,
+            }],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        // Ethernet(14) + IPv4(20) + TCP(20) + 10 = 64
+        assert_eq!(data.len(), 64);
+    }
+
+    #[test]
+    fn test_proto_truncation_fallback_to_global() {
+        // No rule for UDP → falls back to global 20 bytes.
+        let payload = vec![0xDD; 80];
+        let mut data = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 53, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            max_payload_bytes: Some(20),
+            proto_truncation: vec![ProtocolTruncation {
+                proto: PROTO_TCP, // TCP rule only, no UDP rule
+                max_payload_bytes: 5,
+            }],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        // Ethernet(14) + IPv4(20) + UDP(8) + 20 = 62
+        assert_eq!(data.len(), 62);
+    }
+
+    #[test]
+    fn test_proto_truncation_no_match_no_global_no_truncation() {
+        // UDP packet, only a TCP rule, no global — no truncation applied.
+        let payload = vec![0xEE; 50];
+        let mut data = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 53, &payload);
+        let original = data.clone();
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            proto_truncation: vec![ProtocolTruncation {
+                proto: PROTO_TCP,
+                max_payload_bytes: 10,
+            }],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        assert_eq!(data, original);
     }
 
     // ── Combined transforms ───────────────────────────────────────────────────

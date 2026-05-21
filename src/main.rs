@@ -5,7 +5,7 @@ mod cli;
 use anyhow::{Context, Result};
 use pcap_toolkit::{
     bpf,
-    config::Config,
+    config::{Config, TransformConfig},
     export::{self, ExportFormat, ExportOptions},
     filter::{
         Filter, IpNet, PortRange, TcpFlagsFilter, parse_datetime_ns, parse_flow_ids,
@@ -15,14 +15,14 @@ use pcap_toolkit::{
     replay::{self, ReplayOptions, ReplaySpeed},
     sort::{self, SortOptions},
     stats::{CaptureInfo, StatsCollector},
-    transform::{TransformOptions, parse_ip_mapping},
+    transform::{ProtocolTruncation, TransformOptions, parse_ip_mapping},
 };
 
 fn main() -> Result<()> {
     let args = cli::parser().run();
 
     // Load optional config file.
-    let _config = match &args.config {
+    let config = match &args.config {
         Some(path) => Config::from_file(path)
             .with_context(|| format!("failed to load config from {}", path.display()))?,
         None => Config::default(),
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
     match args.command {
         cli::Command::Info(a) => cmd_info(&a),
         cli::Command::Stats(a) => cmd_stats(&a),
-        cli::Command::Sort(a) => cmd_sort(&a),
+        cli::Command::Sort(a) => cmd_sort(&a, &config),
         cli::Command::Export(a) => cmd_export(&a),
         cli::Command::Replay(a) => cmd_replay(&a),
     }
@@ -117,7 +117,7 @@ fn print_flows(info: &CaptureInfo) {
     }
 }
 
-fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
+fn cmd_sort(args: &cli::SortArgs, config: &Config) -> Result<()> {
     if args.inputs.is_empty() {
         anyhow::bail!("sort requires at least one input file");
     }
@@ -139,7 +139,7 @@ fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
         })
         .transpose()?;
 
-    let transform = build_transform(args)?;
+    let transform = build_transform(args, &config.transform)?;
 
     let opts = SortOptions {
         output: args.output.clone(),
@@ -235,24 +235,58 @@ fn build_filter(args: &cli::SortArgs) -> Result<Filter> {
     Ok(f)
 }
 
-/// Construct a [`TransformOptions`] from the CLI arguments on the `sort` subcommand.
-fn build_transform(args: &cli::SortArgs) -> Result<TransformOptions> {
+/// Construct a [`TransformOptions`] from CLI arguments merged with TOML config.
+///
+/// CLI flags take precedence over config values. Per-protocol truncation rules
+/// are TOML-only (no CLI equivalent).
+fn build_transform(args: &cli::SortArgs, cfg: &TransformConfig) -> Result<TransformOptions> {
+    // CLI --max-payload-bytes takes precedence over config value.
+    let max_payload_bytes = args.max_payload_bytes.or(cfg.max_payload_bytes);
+
     let mut t = TransformOptions {
-        max_payload_bytes: args.max_payload_bytes,
+        max_payload_bytes,
         ..TransformOptions::default()
     };
 
-    if let Some(ts_str) = &args.timestamp_start {
+    // CLI --timestamp-start takes precedence over config value.
+    let ts_str = args
+        .timestamp_start
+        .as_deref()
+        .or(cfg.timestamp_start.as_deref());
+    if let Some(ts_str) = ts_str {
         t.timestamp_start_ns = Some(
             parse_datetime_ns(ts_str)
-                .with_context(|| format!("invalid --timestamp-start value '{ts_str}'"))?,
+                .with_context(|| format!("invalid timestamp-start value '{ts_str}'"))?,
         );
     }
 
-    for s in &args.replace_ip {
-        t.ip_map.push(
-            parse_ip_mapping(s).with_context(|| format!("invalid --replace-ip value '{s}'"))?,
-        );
+    // CLI --replace-ip takes precedence: if any CLI entries exist, ignore config.
+    let ip_sources: &[String] = if !args.replace_ip.is_empty() {
+        &args.replace_ip
+    } else {
+        &cfg.replace_ip
+    };
+    for s in ip_sources {
+        t.ip_map
+            .push(parse_ip_mapping(s).with_context(|| format!("invalid replace-ip value '{s}'"))?);
+    }
+
+    // Per-protocol truncation: TOML config only (no CLI equivalent).
+    for rule in &cfg.truncate_by_proto {
+        let proto = parse_proto_list(&rule.proto)
+            .with_context(|| {
+                format!(
+                    "invalid proto '{}' in transform.truncate_by_proto",
+                    rule.proto
+                )
+            })?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("empty proto in transform.truncate_by_proto"))?;
+        t.proto_truncation.push(ProtocolTruncation {
+            proto,
+            max_payload_bytes: rule.max_payload_bytes,
+        });
     }
 
     Ok(t)

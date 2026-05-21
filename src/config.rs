@@ -24,6 +24,9 @@ pub struct Config {
     /// Output targets.
     pub output: Vec<OutputConfig>,
 
+    /// Packet-level transformation options.
+    pub transform: TransformConfig,
+
     /// Structured data export options.
     pub export: ExportConfig,
 
@@ -124,6 +127,28 @@ pub struct FilterRuleConfig {
     pub unidirectional: bool,
 }
 
+/// A single per-protocol payload truncation rule (`[[transform.truncate_by_proto]]`).
+#[derive(Debug)]
+pub struct ProtocolTruncationConfig {
+    /// IP protocol name (`"tcp"`, `"udp"`, `"icmp"`) or decimal number (`"6"`).
+    pub proto: String,
+    /// Maximum payload bytes to keep for this protocol.
+    pub max_payload_bytes: u32,
+}
+
+/// Packet-level transformation configuration (`[transform]` TOML table).
+#[derive(Debug, Default)]
+pub struct TransformConfig {
+    /// Global maximum payload bytes (per-protocol rules take precedence when set).
+    pub max_payload_bytes: Option<u32>,
+    /// Shift all timestamps so the capture starts at this datetime (RFC 3339 or ms epoch).
+    pub timestamp_start: Option<String>,
+    /// IP address replacement rules as `"OLD_IP=NEW_IP"` strings.
+    pub replace_ip: Vec<String>,
+    /// Per-protocol payload truncation rules.
+    pub truncate_by_proto: Vec<ProtocolTruncationConfig>,
+}
+
 /// Structured data export configuration (`[export]` table in TOML).
 #[derive(Debug, Default)]
 pub struct ExportConfig {
@@ -189,6 +214,9 @@ impl<'de> Deserialize<'de> for Config {
         let output = th
             .optional::<Vec<OutputConfig>>("output")
             .unwrap_or_default();
+        let transform = th
+            .optional::<TransformConfig>("transform")
+            .unwrap_or_default();
         let export = th.optional::<ExportConfig>("export").unwrap_or_default();
         let replay = th.optional::<ReplayConfig>("replay").unwrap_or_default();
         th.finalize(None)?;
@@ -197,6 +225,7 @@ impl<'de> Deserialize<'de> for Config {
             sort,
             filter,
             output,
+            transform,
             export,
             replay,
         })
@@ -300,6 +329,38 @@ impl<'de> Deserialize<'de> for FilterRuleConfig {
             min_len,
             max_len,
             unidirectional,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ProtocolTruncationConfig {
+    fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
+        let mut th = TableHelper::new(value)?;
+        let proto = th.required::<String>("proto")?;
+        let max_payload_bytes = th.required::<u32>("max_payload_bytes")?;
+        th.finalize(None)?;
+        Ok(ProtocolTruncationConfig {
+            proto,
+            max_payload_bytes,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for TransformConfig {
+    fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
+        let mut th = TableHelper::new(value)?;
+        let max_payload_bytes = th.optional::<u32>("max_payload_bytes");
+        let timestamp_start = th.optional::<String>("timestamp_start");
+        let replace_ip = th.optional::<Vec<String>>("replace_ip").unwrap_or_default();
+        let truncate_by_proto = th
+            .optional::<Vec<ProtocolTruncationConfig>>("truncate_by_proto")
+            .unwrap_or_default();
+        th.finalize(None)?;
+        Ok(TransformConfig {
+            max_payload_bytes,
+            timestamp_start,
+            replace_ip,
+            truncate_by_proto,
         })
     }
 }
@@ -473,5 +534,74 @@ bogus_key = "oops"
         let mut value = toml_span::parse(toml).unwrap();
         let result = Config::deserialize(&mut value);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transform_config_global_truncation() {
+        let toml = r#"
+[transform]
+max_payload_bytes = 256
+timestamp_start = "2024-01-01T00:00:00Z"
+replace_ip = ["10.0.0.1=192.168.1.1"]
+"#;
+        let mut value = toml_span::parse(toml).unwrap();
+        let config = Config::deserialize(&mut value).unwrap();
+        assert_eq!(config.transform.max_payload_bytes, Some(256));
+        assert_eq!(
+            config.transform.timestamp_start.as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
+        assert_eq!(config.transform.replace_ip, ["10.0.0.1=192.168.1.1"]);
+        assert!(config.transform.truncate_by_proto.is_empty());
+    }
+
+    #[test]
+    fn test_transform_config_per_proto_truncation() {
+        let toml = r#"
+[transform]
+max_payload_bytes = 512
+
+[[transform.truncate_by_proto]]
+proto = "tcp"
+max_payload_bytes = 128
+
+[[transform.truncate_by_proto]]
+proto = "udp"
+max_payload_bytes = 64
+"#;
+        let mut value = toml_span::parse(toml).unwrap();
+        let config = Config::deserialize(&mut value).unwrap();
+        assert_eq!(config.transform.max_payload_bytes, Some(512));
+        assert_eq!(config.transform.truncate_by_proto.len(), 2);
+        assert_eq!(config.transform.truncate_by_proto[0].proto, "tcp");
+        assert_eq!(config.transform.truncate_by_proto[0].max_payload_bytes, 128);
+        assert_eq!(config.transform.truncate_by_proto[1].proto, "udp");
+        assert_eq!(config.transform.truncate_by_proto[1].max_payload_bytes, 64);
+    }
+
+    #[test]
+    fn test_transform_config_proto_only_no_global() {
+        let toml = r#"
+[[transform.truncate_by_proto]]
+proto = "17"
+max_payload_bytes = 32
+"#;
+        let mut value = toml_span::parse(toml).unwrap();
+        let config = Config::deserialize(&mut value).unwrap();
+        assert!(config.transform.max_payload_bytes.is_none());
+        assert_eq!(config.transform.truncate_by_proto.len(), 1);
+        assert_eq!(config.transform.truncate_by_proto[0].proto, "17");
+        assert_eq!(config.transform.truncate_by_proto[0].max_payload_bytes, 32);
+    }
+
+    #[test]
+    fn test_empty_transform_section() {
+        let toml = r#"
+[transform]
+"#;
+        let mut value = toml_span::parse(toml).unwrap();
+        let config = Config::deserialize(&mut value).unwrap();
+        assert!(config.transform.max_payload_bytes.is_none());
+        assert!(config.transform.truncate_by_proto.is_empty());
     }
 }

@@ -176,13 +176,13 @@ Send a (possibly filtered, modified, sorted, or time-shifted) capture onto a rea
 
 Items not yet scoped — open for discussion before implementation.
 
-- **IPv4 ↔ IPv6 cross-family IP mapping**: replacing an IPv4 address with an IPv6 one (or vice versa) changes the Ethernet payload size and requires re-framing the entire packet. Needs a careful design (new `orig_len`, adjusted snap length, possible MTU implications).
-- **Per-protocol truncation rules in TOML**: e.g. keep 128 bytes for TCP/HTTP but only 64 bytes for UDP/DNS, letting users tune storage vs. fidelity per traffic type.
-- **PCAPng support**: extended block types (EPB, ISB, NRB) for richer metadata and multi-interface captures.
-- **Streaming input**: read from a live capture interface (`libpcap`) or a named pipe in addition to files, enabling use as a processing stage in a pipeline.
-- **Flow count threshold filter**: only include flows with ≥ N packets, filtering out noise and single-packet anomalies.
-- **Payload content filter**: byte pattern or regex match inside the packet payload. Powerful for finding specific application-layer markers but costly — evaluate impact before implementing.
-- **zstd compression on RAW data**: (examples: Apache Parquet + Zstd (standard), Apache Avro + Zstd (The Streaming Choice))
+- [ ] **IPv4 ↔ IPv6 cross-family IP mapping**: replacing an IPv4 address with an IPv6 one (or vice versa) changes the Ethernet payload size and requires re-framing the entire packet. Needs a careful design (new `orig_len`, adjusted snap length, possible MTU implications).
+- [x] **Per-protocol truncation rules in TOML**: e.g. keep 128 bytes for TCP/HTTP but only 64 bytes for UDP/DNS, letting users tune storage vs. fidelity per traffic type.
+- [ ] **PCAPng support**: extended block types (EPB, ISB, NRB) for richer metadata and multi-interface captures.
+- [ ] **Streaming input**: read from a live capture interface (`libpcap`) or a named pipe in addition to files, enabling use as a processing stage in a pipeline.
+- [ ] **Flow count threshold filter**: only include flows with ≥ N packets, filtering out noise and single-packet anomalies.
+- [ ] **Payload content filter**: byte pattern or regex match inside the packet payload. Powerful for finding specific application-layer markers but costly — evaluate impact before implementing.
+- [ ] **zstd compression on RAW data**: (examples: Apache Parquet + Zstd (standard), Apache Avro + Zstd (The Streaming Choice))
 
 - **I/O buffer tuning**: `BufWriter` is already used in the JSON and PCAP sort writers, but both use the default 8 KB internal capacity. At 8 KB, the JSON writer flushes roughly every 20–40 packet records; the PCAP sort writer flushes every 5–130 packets depending on frame size. Both should be raised to `BufWriter::with_capacity(64 * 1024, file)` (64 KB), cutting write syscalls by ~8×. The Parquet and Avro writers write directly to `File` without a `BufWriter`, which is intentional: the `parquet` crate buffers internally per row group (4 096 rows) and `apache-avro` buffers per Avro block — adding a second layer would double-buffer with no gain. The only actionable change is adjusting the two explicit `BufWriter::new(…)` call sites.
 
