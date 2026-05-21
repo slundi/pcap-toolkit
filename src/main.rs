@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use pcap_toolkit::{
     config::Config,
     pcap,
+    sort::{self, SortOptions},
     stats::{CaptureInfo, StatsCollector},
 };
 
@@ -22,6 +23,7 @@ fn main() -> Result<()> {
     match args.command {
         cli::Command::Info(a) => cmd_info(&a),
         cli::Command::Stats(a) => cmd_stats(&a),
+        cli::Command::Sort(a) => cmd_sort(&a),
     }
 }
 
@@ -103,6 +105,34 @@ fn print_flows(info: &CaptureInfo) {
             f.flow_id,
         );
     }
+}
+
+fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
+    let slice_secs = args
+        .slice
+        .as_deref()
+        .map(sort::parse_slice)
+        .transpose()
+        .with_context(|| "invalid --slice value")?;
+
+    let opts = SortOptions {
+        output: args.output.clone(),
+        slice_secs,
+        on_disk: args.on_disk,
+    };
+
+    let report = sort::sort_file(&args.input, &opts)
+        .with_context(|| format!("failed to sort {}", args.input.display()))?;
+
+    println!(
+        "Sorted {} packet(s) into {} file(s):",
+        report.packets_written,
+        report.files_written.len()
+    );
+    for f in &report.files_written {
+        println!("  {}", f.display());
+    }
+    Ok(())
 }
 
 fn format_duration(d: chrono::Duration) -> String {

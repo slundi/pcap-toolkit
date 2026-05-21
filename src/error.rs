@@ -36,3 +36,19 @@ impl From<toml_span::Error> for ConfigError {
         ConfigError::Toml(toml_span::DeserError::from(e))
     }
 }
+
+/// Errors produced by the two-pass sorter.
+#[derive(Debug, Error)]
+pub enum SortError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("PCAP parse error: {0}")]
+    Parse(String),
+
+    #[error("PCAPng input is not supported for sorting; use `info` or `stats` instead")]
+    PcapNgNotSupported,
+
+    #[error("invalid slice duration '{0}': expected e.g. '1h', '30m', '1d', or seconds")]
+    InvalidSlice(String),
+}

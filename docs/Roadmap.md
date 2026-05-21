@@ -38,14 +38,14 @@ Core building blocks everything else depends on.
 
 Designed to handle TB-scale captures without loading everything into RAM.
 
-- [ ] Design the `PacketIndex` record (≈ 20 bytes):
+- [x] Design the `PacketIndex` record (≈ 20 bytes):
   `timestamp_ns: u64`, `byte_offset: u64`, `packet_len: u32`.
-- [ ] **First Pass — Index Build**: scan PCAP sequentially, emit one `PacketIndex` per packet.
+- [x] **First Pass — Index Build**: scan PCAP sequentially, emit one `PacketIndex` per packet.
   - In-memory mode: hold the full index in a `Vec` (fast path for files that fit in RAM).
   - On-disk mode: stream the index to a `.idx` sidecar file for TB-scale inputs; the index itself stays small (~20 MB per 1 M packets).
-- [ ] **Second Pass — Sorted Output / Replay**: sort the index by `timestamp_ns`, then seek and stream packets in order to the output pipeline (write PCAP or feed the replay engine).
-- [ ] Enforce PCAP Global Header mirroring on all output chunks (link type, snap length, endianness).
-- [ ] Add time-slicing: split sorted output into separate files by interval (hourly, daily, or custom duration).
+- [x] **Second Pass — Sorted Output / Replay**: sort the index by `timestamp_ns`, then seek and stream packets in order to the output pipeline (write PCAP or feed the replay engine).
+- [x] Enforce PCAP Global Header mirroring on all output chunks (link type, snap length, endianness).
+- [x] Add time-slicing: split sorted output into separate files by interval (hourly, daily, or custom duration).
 
 ## Phase 3: Filtering
 
@@ -141,3 +141,5 @@ Items not yet scoped — open for discussion before implementation.
 - **Streaming input**: read from a live capture interface (`libpcap`) or a named pipe in addition to files, enabling use as a processing stage in a pipeline.
 - **Flow count threshold filter**: only include flows with ≥ N packets, filtering out noise and single-packet anomalies.
 - **Payload content filter**: byte pattern or regex match inside the packet payload. Powerful for finding specific application-layer markers but costly — evaluate impact before implementing.
+- **zstd compression on RAW data**: (examples: Apache Parquet + Zstd (standard), Apache Avro + Zstd (The Streaming Choice))
+- **output/export buffer writer**: BuffWriter from rust. Writing to the disk packet by packet is one of the quickest ways to kill performance.
