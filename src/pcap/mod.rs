@@ -13,7 +13,7 @@ use pcap_parser::traits::PcapReaderIterator;
 use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError, PcapNGReader};
 
 use crate::error::PcapError as ToolkitPcapError;
-use crate::stats::FlowKey;
+use crate::flow::FlowKey;
 
 /// Parsed metadata for a single packet.
 #[derive(Debug)]

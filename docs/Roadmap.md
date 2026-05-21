@@ -53,7 +53,7 @@ Filters are evaluated during the second pass, after sorting, before any output o
 
 ### Flow Identity
 
-- [ ] Define a deterministic **Flow ID** computed with `xxh3_64`:
+- [x] Define a deterministic **Flow ID** computed with `xxh3_64`:
   - **Bidirectional (default)**: canonicalize the two endpoints before hashing so that A→B and B→A share the same ID.
     Canonical form: `sort_lex((src_ip, src_port), (dst_ip, dst_port))` → `(min_ep || max_ep || protocol)`.
   - **Unidirectional**: hash `(src_ip, src_port, dst_ip, dst_port, protocol)` as-is, no reordering.
