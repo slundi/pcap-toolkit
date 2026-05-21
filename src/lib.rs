@@ -7,6 +7,7 @@ pub mod export;
 pub mod filter;
 pub mod flow;
 pub mod pcap;
+pub mod replay;
 pub mod sort;
 pub mod stats;
 pub mod transform;

@@ -12,6 +12,7 @@ use pcap_toolkit::{
         parse_proto_list,
     },
     pcap,
+    replay::{self, ReplayOptions, ReplaySpeed},
     sort::{self, SortOptions},
     stats::{CaptureInfo, StatsCollector},
     transform::{TransformOptions, parse_ip_mapping},
@@ -32,6 +33,7 @@ fn main() -> Result<()> {
         cli::Command::Stats(a) => cmd_stats(&a),
         cli::Command::Sort(a) => cmd_sort(&a),
         cli::Command::Export(a) => cmd_export(&a),
+        cli::Command::Replay(a) => cmd_replay(&a),
     }
 }
 
@@ -305,6 +307,119 @@ fn cmd_export(args: &cli::ExportArgs) -> Result<()> {
 
 /// Build a [`Filter`] from the `export` subcommand CLI arguments.
 fn build_export_filter(args: &cli::ExportArgs) -> Result<Filter> {
+    let mut f = Filter {
+        unidirectional: args.unidirectional,
+        negate: args.negate,
+        ..Filter::default()
+    };
+
+    if let Some(proto_str) = &args.proto {
+        f.protocols = parse_proto_list(proto_str)
+            .with_context(|| format!("invalid --proto value '{proto_str}'"))?;
+    }
+
+    for s in &args.src_ip {
+        f.src_ips
+            .push(IpNet::parse(s).with_context(|| format!("invalid --src-ip value '{s}'"))?);
+    }
+    for s in &args.dst_ip {
+        f.dst_ips
+            .push(IpNet::parse(s).with_context(|| format!("invalid --dst-ip value '{s}'"))?);
+    }
+    for s in &args.ip {
+        f.ips
+            .push(IpNet::parse(s).with_context(|| format!("invalid --ip value '{s}'"))?);
+    }
+
+    for s in &args.src_port {
+        f.src_ports
+            .push(PortRange::parse(s).with_context(|| format!("invalid --src-port value '{s}'"))?);
+    }
+    for s in &args.dst_port {
+        f.dst_ports
+            .push(PortRange::parse(s).with_context(|| format!("invalid --dst-port value '{s}'"))?);
+    }
+    for s in &args.port {
+        f.ports
+            .push(PortRange::parse(s).with_context(|| format!("invalid --port value '{s}'"))?);
+    }
+
+    if let Some(ids_str) = &args.flow_id {
+        f.flow_ids = parse_flow_ids(ids_str)
+            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?;
+    }
+
+    if let Some(from_str) = &args.from {
+        f.from_ns = Some(
+            parse_datetime_ns(from_str)
+                .with_context(|| format!("invalid --from value '{from_str}'"))?,
+        );
+    }
+    if let Some(to_str) = &args.to {
+        f.to_ns = Some(
+            parse_datetime_ns(to_str).with_context(|| format!("invalid --to value '{to_str}'"))?,
+        );
+    }
+
+    if let Some(flags_str) = &args.tcp_flags {
+        f.tcp_flags = Some(
+            TcpFlagsFilter::parse(flags_str)
+                .with_context(|| format!("invalid --tcp-flags value '{flags_str}'"))?,
+        );
+    }
+
+    f.min_len = args.min_len;
+    f.max_len = args.max_len;
+
+    Ok(f)
+}
+
+fn cmd_replay(args: &cli::ReplayArgs) -> Result<()> {
+    if args.speed.is_some() && args.pps.is_some() {
+        anyhow::bail!("--speed and --pps are mutually exclusive; use one or the other");
+    }
+
+    let speed = if let Some(n) = args.pps {
+        ReplaySpeed::Pps(n)
+    } else if let Some(s) = &args.speed {
+        ReplaySpeed::parse(s).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid --speed value '{s}': expected a positive number (e.g. 2.0) or 'max'"
+            )
+        })?
+    } else {
+        ReplaySpeed::RealTime
+    };
+
+    let filter = build_replay_filter(args)?;
+
+    let bpf_filter = args
+        .filter_expr
+        .as_deref()
+        .map(|expr| {
+            bpf::parse(expr).with_context(|| format!("invalid --filter expression '{expr}'"))
+        })
+        .transpose()?;
+
+    let opts = ReplayOptions {
+        interface: args.interface.clone(),
+        speed,
+        filter,
+        bpf_filter,
+    };
+
+    let report = replay::replay_file(&args.input, &opts)
+        .with_context(|| format!("failed to replay {}", args.input.display()))?;
+
+    println!(
+        "Replayed {} packet(s) ({} bytes) on {}",
+        report.packets_sent, report.bytes_sent, args.interface
+    );
+    Ok(())
+}
+
+/// Build a [`Filter`] from the `replay` subcommand CLI arguments.
+fn build_replay_filter(args: &cli::ReplayArgs) -> Result<Filter> {
     let mut f = Filter {
         unidirectional: args.unidirectional,
         negate: args.negate,

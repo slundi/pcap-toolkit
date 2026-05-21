@@ -48,6 +48,9 @@ thiserror = "2.0.18"
 toml-span = "0.7.1"
 zstd = "0.13"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+socket2 = { version = "0.5", features = ["all"] }
+
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

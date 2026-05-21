@@ -159,8 +159,13 @@ pub struct ReplayConfig {
     /// Network interface name for replay.
     pub interface: Option<String>,
 
-    /// Replay speed multiplier (1.0 = real-time).
+    /// Replay speed multiplier (1.0 = real-time, 2.0 = 2× faster).
+    /// Ignored when `pps` is set.
     pub speed: f64,
+
+    /// Fixed replay rate in packets per second.
+    /// When set, `speed` is ignored and original inter-packet timing is discarded.
+    pub pps: Option<u64>,
 }
 
 impl Default for ReplayConfig {
@@ -168,6 +173,7 @@ impl Default for ReplayConfig {
         Self {
             interface: None,
             speed: 1.0,
+            pps: None,
         }
     }
 }
@@ -335,8 +341,13 @@ impl<'de> Deserialize<'de> for ReplayConfig {
         let mut th = TableHelper::new(value)?;
         let interface = th.optional::<String>("interface");
         let speed = th.optional::<f64>("speed").unwrap_or(1.0);
+        let pps = th.optional::<u64>("pps");
         th.finalize(None)?;
-        Ok(ReplayConfig { interface, speed })
+        Ok(ReplayConfig {
+            interface,
+            speed,
+            pps,
+        })
     }
 }
 

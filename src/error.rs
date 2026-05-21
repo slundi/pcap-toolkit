@@ -59,6 +59,25 @@ pub enum ExportError {
     UnknownFormat(String),
 }
 
+/// Errors produced by the live replay engine.
+#[derive(Debug, Error)]
+pub enum ReplayError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
+    #[error("unknown interface '{0}': not found in /sys/class/net/")]
+    UnknownInterface(String),
+
+    #[error("PCAP parse error: {0}")]
+    PcapParse(String),
+
+    #[error("live replay is not supported on this platform (Linux only)")]
+    NotSupported,
+}
+
 /// Errors produced by the two-pass sorter.
 #[derive(Debug, Error)]
 pub enum SortError {

@@ -158,11 +158,11 @@ Turn raw packets into queryable columnar or document data.
 
 Send a (possibly filtered, modified, sorted, or time-shifted) capture onto a real network interface.
 
-- [ ] Implement the `replay` command: read packets from the second-pass pipeline and transmit them via a raw socket (`socket2` or `AF_PACKET` on Linux).
-- [ ] Honour original inter-packet timing or support a speed multiplier (`--speed 2.0`, `--speed max`).
-- [ ] Paquet per second `-pps 4096` that will ignore previous inter-packet timing.
-- [ ] Accept replay interface from CLI flag or TOML config.
-- [ ] Graceful permission check: detect missing `CAP_NET_RAW` and emit a clear error.
+- [x] Implement the `replay` command: read packets from the second-pass pipeline and transmit them via a raw socket (`socket2` + `AF_PACKET` on Linux).
+- [x] Honour original inter-packet timing or support a speed multiplier (`--speed 2.0`, `--speed max`).
+- [x] Paquet per second `--pps 4096` that will ignore previous inter-packet timing.
+- [x] Accept replay interface from CLI flag or TOML config.
+- [x] Graceful permission check: detect missing `CAP_NET_RAW` and emit a clear error.
 
 ## Phase 7: Performance & Scale
 
@@ -185,3 +185,4 @@ Items not yet scoped — open for discussion before implementation.
 - **zstd compression on RAW data**: (examples: Apache Parquet + Zstd (standard), Apache Avro + Zstd (The Streaming Choice))
 - **output/export buffer writer**: BuffWriter from rust. Writing to the disk packet by packet is one of the quickest ways to kill performance.
 - **multiple output/export**
+- **replay on multiple interfaces**
