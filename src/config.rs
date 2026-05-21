@@ -48,6 +48,12 @@ pub struct SortConfig {
 /// Filter configuration.
 #[derive(Debug, Default)]
 pub struct FilterConfig {
+    /// When `true`, the entire filter result is inverted.
+    pub negate: bool,
+
+    /// Additional filter rules chained after the base body.
+    pub rules: Vec<FilterRuleConfig>,
+
     /// IP protocols to keep (e.g. `["tcp", "udp"]`).
     pub proto: Vec<String>,
 
@@ -88,6 +94,30 @@ pub struct FilterConfig {
     pub max_len: Option<u32>,
 
     /// Use unidirectional flow IDs (default: bidirectional).
+    pub unidirectional: bool,
+}
+
+/// A single rule entry within `[[filter.rules]]` in the TOML config.
+///
+/// The `op` field controls how this rule combines with the accumulated result:
+/// `"and"` (default), `"or"`, or `"not"`.
+#[derive(Debug, Default)]
+pub struct FilterRuleConfig {
+    /// Logical operator: `"and"`, `"or"`, or `"not"`.
+    pub op: String,
+    pub proto: Vec<String>,
+    pub src_ip: Vec<String>,
+    pub dst_ip: Vec<String>,
+    pub ip: Vec<String>,
+    pub src_port: Vec<String>,
+    pub dst_port: Vec<String>,
+    pub port: Vec<String>,
+    pub flow_id: Vec<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub tcp_flags: Option<String>,
+    pub min_len: Option<u32>,
+    pub max_len: Option<u32>,
     pub unidirectional: bool,
 }
 
@@ -168,6 +198,10 @@ impl<'de> Deserialize<'de> for SortConfig {
 impl<'de> Deserialize<'de> for FilterConfig {
     fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
         let mut th = TableHelper::new(value)?;
+        let negate = th.optional::<bool>("negate").unwrap_or(false);
+        let rules = th
+            .optional::<Vec<FilterRuleConfig>>("rules")
+            .unwrap_or_default();
         let proto = th.optional::<Vec<String>>("proto").unwrap_or_default();
         let src_ip = th.optional::<Vec<String>>("src_ip").unwrap_or_default();
         let dst_ip = th.optional::<Vec<String>>("dst_ip").unwrap_or_default();
@@ -184,6 +218,47 @@ impl<'de> Deserialize<'de> for FilterConfig {
         let unidirectional = th.optional::<bool>("unidirectional").unwrap_or(false);
         th.finalize(None)?;
         Ok(FilterConfig {
+            negate,
+            rules,
+            proto,
+            src_ip,
+            dst_ip,
+            ip,
+            src_port,
+            dst_port,
+            port,
+            flow_id,
+            from,
+            to,
+            tcp_flags,
+            min_len,
+            max_len,
+            unidirectional,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for FilterRuleConfig {
+    fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
+        let mut th = TableHelper::new(value)?;
+        let op = th.optional::<String>("op").unwrap_or_default();
+        let proto = th.optional::<Vec<String>>("proto").unwrap_or_default();
+        let src_ip = th.optional::<Vec<String>>("src_ip").unwrap_or_default();
+        let dst_ip = th.optional::<Vec<String>>("dst_ip").unwrap_or_default();
+        let ip = th.optional::<Vec<String>>("ip").unwrap_or_default();
+        let src_port = th.optional::<Vec<String>>("src_port").unwrap_or_default();
+        let dst_port = th.optional::<Vec<String>>("dst_port").unwrap_or_default();
+        let port = th.optional::<Vec<String>>("port").unwrap_or_default();
+        let flow_id = th.optional::<Vec<String>>("flow_id").unwrap_or_default();
+        let from = th.optional::<String>("from");
+        let to = th.optional::<String>("to");
+        let tcp_flags = th.optional::<String>("tcp_flags");
+        let min_len = th.optional::<u32>("min_len");
+        let max_len = th.optional::<u32>("max_len");
+        let unidirectional = th.optional::<bool>("unidirectional").unwrap_or(false);
+        th.finalize(None)?;
+        Ok(FilterRuleConfig {
+            op,
             proto,
             src_ip,
             dst_ip,
@@ -292,6 +367,43 @@ speed = 2.0
         assert_eq!(config.output[0].format, "parquet");
         assert_eq!(config.replay.speed, 2.0);
         assert_eq!(config.replay.interface.as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn test_filter_rules_toml() {
+        let toml = r#"
+[filter]
+proto = ["tcp"]
+
+[[filter.rules]]
+op = "or"
+proto = ["udp"]
+
+[[filter.rules]]
+op = "not"
+dst_ip = ["10.0.0.0/8"]
+"#;
+        let mut value = toml_span::parse(toml).unwrap();
+        let config = Config::deserialize(&mut value).unwrap();
+        assert_eq!(config.filter.proto, ["tcp"]);
+        assert_eq!(config.filter.rules.len(), 2);
+        assert_eq!(config.filter.rules[0].op, "or");
+        assert_eq!(config.filter.rules[0].proto, ["udp"]);
+        assert_eq!(config.filter.rules[1].op, "not");
+        assert_eq!(config.filter.rules[1].dst_ip, ["10.0.0.0/8"]);
+    }
+
+    #[test]
+    fn test_filter_negate_toml() {
+        let toml = r#"
+[filter]
+negate = true
+proto = ["tcp"]
+"#;
+        let mut value = toml_span::parse(toml).unwrap();
+        let config = Config::deserialize(&mut value).unwrap();
+        assert!(config.filter.negate);
+        assert_eq!(config.filter.proto, ["tcp"]);
     }
 
     #[test]

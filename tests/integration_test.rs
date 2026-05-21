@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use pcap_toolkit::filter::{Filter, IpNet, PortRange};
+use pcap_toolkit::filter::{Filter, FilterRule, IpNet, Op, PortRange};
 use pcap_toolkit::flow::FlowKey;
 use pcap_toolkit::sort::{SortOptions, parse_slice, sort_file};
 
@@ -455,6 +455,102 @@ fn test_filter_empty_output_when_nothing_matches() {
     assert!(report.files_written.is_empty());
 
     let _ = std::fs::remove_file(&input);
+}
+
+#[test]
+fn test_filter_negate_inverts_result() {
+    // Base filter: TCP only. With negate=true, should keep everything that is NOT TCP.
+    let tcp_frame = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 1234, 80, 0x02, &[0u8; 4]);
+    let udp_frame = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 1234, 53, &[0u8; 4]);
+
+    let pcap_data = build_pcap(&[(1, 0, tcp_frame), (2, 0, udp_frame)]);
+    let input = write_tmp_pcap("filter_negate_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("filter_negate_out.pcap");
+
+    let mut filter = Filter::default();
+    filter.protocols = vec![6]; // TCP only
+    filter.negate = true; // invert: keep non-TCP
+
+    let opts = SortOptions {
+        output: output.clone(),
+        filter,
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 1,
+        "only non-TCP (UDP) packet should pass"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_filter_or_rule_chain() {
+    // Base filter: TCP only.
+    // OR rule: UDP proto.
+    // Result: packets matching TCP OR UDP should both pass.
+    let tcp_frame = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 1234, 80, 0x02, &[0u8; 4]);
+    let udp_frame = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 1234, 53, &[0u8; 4]);
+
+    let pcap_data = build_pcap(&[(1, 0, tcp_frame), (2, 0, udp_frame)]);
+    let input = write_tmp_pcap("filter_or_rule_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("filter_or_rule_out.pcap");
+
+    let mut filter = Filter::default();
+    filter.protocols = vec![6]; // base: TCP only
+    let mut udp_rule = FilterRule::default();
+    udp_rule.op = Op::Or;
+    udp_rule.protocols = vec![17]; // OR UDP
+    filter.rules = vec![udp_rule];
+
+    let opts = SortOptions {
+        output: output.clone(),
+        filter,
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 2,
+        "TCP and UDP packets should both pass"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_filter_not_rule_excludes_subset() {
+    // Base filter: matches all packets (empty).
+    // NOT rule: exclude packets with dst_port=80.
+    // Only non-port-80 packet should pass.
+    let http = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 80, 0x02, &[0u8; 4]);
+    let https = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 5001, 443, 0x02, &[0u8; 4]);
+
+    let pcap_data = build_pcap(&[(1, 0, http), (2, 0, https)]);
+    let input = write_tmp_pcap("filter_not_rule_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("filter_not_rule_out.pcap");
+
+    let mut filter = Filter::default();
+    let mut exclude_rule = FilterRule::default();
+    exclude_rule.op = Op::Not;
+    exclude_rule.dst_ports = vec![PortRange { start: 80, end: 80 }];
+    filter.rules = vec![exclude_rule];
+
+    let opts = SortOptions {
+        output: output.clone(),
+        filter,
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 1,
+        "only the non-port-80 packet should pass"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
 }
 
 #[test]

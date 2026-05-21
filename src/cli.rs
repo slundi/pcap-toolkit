@@ -80,6 +80,8 @@ pub struct SortArgs {
     pub max_len: Option<u32>,
     /// Compute flow IDs unidirectionally (default: bidirectional).
     pub unidirectional: bool,
+    /// Invert the entire filter result (keep packets that do NOT match).
+    pub negate: bool,
 }
 
 fn config_opt() -> impl Parser<Option<PathBuf>> {
@@ -191,6 +193,9 @@ fn sort_cmd() -> impl Parser<Command> {
         .short('u')
         .help("Compute flow IDs unidirectionally (default: bidirectional)")
         .switch();
+    let negate = long("not")
+        .help("Invert the filter: keep packets that do NOT match the filter rules")
+        .switch();
 
     construct!(SortArgs {
         on_disk,
@@ -210,6 +215,7 @@ fn sort_cmd() -> impl Parser<Command> {
         min_len,
         max_len,
         unidirectional,
+        negate,
         input,
     })
     .to_options()

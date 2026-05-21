@@ -81,10 +81,10 @@ Filters are evaluated during the second pass, after sorting, before any output o
 
 ### Logical Composition
 
-- [ ] Support `--not` prefix to negate any single filter rule.
-- [ ] Multiple rules of the same type are OR-ed by default (e.g. two `--src-ip` rules keep packets matching either).
-- [ ] Rules of different types are AND-ed (protocol AND ip AND port must all match).
-- [ ] TOML config supports explicit `[[filter.rules]]` blocks with an `op = "and|or|not"` field for full boolean control.
+- [x] Support `--not` prefix to negate any single filter rule.
+- [x] Multiple rules of the same type are OR-ed by default (e.g. two `--src-ip` rules keep packets matching either).
+- [x] Rules of different types are AND-ed (protocol AND ip AND port must all match).
+- [x] TOML config supports explicit `[[filter.rules]]` blocks with an `op = "and|or|not"` field for full boolean control.
 
 ### BPF Expression Filter
 

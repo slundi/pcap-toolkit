@@ -42,6 +42,9 @@ pub enum FilterError {
          known flags: FIN SYN RST PSH ACK URG ECE CWR: '{0}'"
     )]
     InvalidTcpFlags(String),
+
+    #[error("invalid filter operator (expected 'and', 'or', or 'not'): '{0}'")]
+    InvalidOp(String),
 }
 
 // ── IpNet ────────────────────────────────────────────────────────────────────
@@ -402,23 +405,249 @@ fn parse_ethernet(data: &[u8]) -> (Option<FlowKey>, u8) {
     (Some(key), tcp_flags)
 }
 
+// ── Logical composition ───────────────────────────────────────────────────────
+
+/// Logical operator used when chaining [`FilterRule`]s in a [`Filter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Op {
+    /// `accumulated = accumulated AND rule.matches(packet)` (default).
+    #[default]
+    And,
+    /// `accumulated = accumulated OR rule.matches(packet)`.
+    Or,
+    /// `accumulated = accumulated AND NOT rule.matches(packet)`.
+    Not,
+}
+
+impl Op {
+    /// Parse `"and"`, `"or"`, or `"not"` (case-insensitive).
+    ///
+    /// # Errors
+    /// Returns [`FilterError::InvalidOp`] for any other value.
+    pub fn parse(s: &str) -> Result<Self, FilterError> {
+        match s.to_ascii_lowercase().as_str() {
+            "and" => Ok(Self::And),
+            "or" => Ok(Self::Or),
+            "not" => Ok(Self::Not),
+            _ => Err(FilterError::InvalidOp(s.to_owned())),
+        }
+    }
+}
+
+// ── Shared flat-body matching ─────────────────────────────────────────────────
+
+/// Private trait — provides getters so `eval_body` can work over both
+/// [`Filter`] (base body) and [`FilterRule`] without code duplication.
+trait FilterBody {
+    fn protocols(&self) -> &[u8];
+    fn src_ips(&self) -> &[IpNet];
+    fn dst_ips(&self) -> &[IpNet];
+    fn ips(&self) -> &[IpNet];
+    fn src_ports(&self) -> &[PortRange];
+    fn dst_ports(&self) -> &[PortRange];
+    fn ports(&self) -> &[PortRange];
+    fn flow_ids(&self) -> &[u64];
+    fn start_ns(&self) -> Option<u64>;
+    fn end_ns(&self) -> Option<u64>;
+    fn tcp_flags(&self) -> Option<TcpFlagsFilter>;
+    fn min_len(&self) -> Option<u32>;
+    fn max_len(&self) -> Option<u32>;
+    fn unidirectional(&self) -> bool;
+}
+
+/// Generate a `FilterBody` impl for a struct whose fields have the same names.
+macro_rules! impl_filter_body {
+    ($T:ty) => {
+        impl FilterBody for $T {
+            fn protocols(&self) -> &[u8] {
+                &self.protocols
+            }
+            fn src_ips(&self) -> &[IpNet] {
+                &self.src_ips
+            }
+            fn dst_ips(&self) -> &[IpNet] {
+                &self.dst_ips
+            }
+            fn ips(&self) -> &[IpNet] {
+                &self.ips
+            }
+            fn src_ports(&self) -> &[PortRange] {
+                &self.src_ports
+            }
+            fn dst_ports(&self) -> &[PortRange] {
+                &self.dst_ports
+            }
+            fn ports(&self) -> &[PortRange] {
+                &self.ports
+            }
+            fn flow_ids(&self) -> &[u64] {
+                &self.flow_ids
+            }
+            fn start_ns(&self) -> Option<u64> {
+                self.from_ns
+            }
+            fn end_ns(&self) -> Option<u64> {
+                self.to_ns
+            }
+            fn tcp_flags(&self) -> Option<TcpFlagsFilter> {
+                self.tcp_flags
+            }
+            fn min_len(&self) -> Option<u32> {
+                self.min_len
+            }
+            fn max_len(&self) -> Option<u32> {
+                self.max_len
+            }
+            fn unidirectional(&self) -> bool {
+                self.unidirectional
+            }
+        }
+    };
+}
+
+/// Core flat-filter evaluation shared by [`Filter`] and [`FilterRule`].
+///
+/// - Categories are **AND**-ed: all active categories must pass.
+/// - Values within a category are **OR**-ed: any one match is sufficient.
+/// - Port filters are silently skipped for protocols other than TCP (6) / UDP (17).
+fn eval_body(b: &impl FilterBody, meta: &PacketMeta) -> bool {
+    // ── Time range ────────────────────────────────────────────────────────
+    if let Some(from) = b.start_ns()
+        && meta.timestamp_ns < from
+    {
+        return false;
+    }
+    if let Some(to) = b.end_ns()
+        && meta.timestamp_ns > to
+    {
+        return false;
+    }
+
+    // ── Packet length ─────────────────────────────────────────────────────
+    if let Some(min) = b.min_len()
+        && meta.captured_len < min
+    {
+        return false;
+    }
+    if let Some(max) = b.max_len()
+        && meta.captured_len > max
+    {
+        return false;
+    }
+
+    // Early exit: remaining checks all require a parsed flow key.
+    let need_flow = !b.protocols().is_empty()
+        || !b.src_ips().is_empty()
+        || !b.dst_ips().is_empty()
+        || !b.ips().is_empty()
+        || !b.src_ports().is_empty()
+        || !b.dst_ports().is_empty()
+        || !b.ports().is_empty()
+        || !b.flow_ids().is_empty()
+        || b.tcp_flags().is_some();
+
+    if !need_flow {
+        return true;
+    }
+
+    // Non-IP packets fail any flow-level filter.
+    let key = match &meta.flow_key {
+        Some(k) => k,
+        None => return false,
+    };
+
+    // ── Protocol ──────────────────────────────────────────────────────────
+    if !b.protocols().is_empty() && !b.protocols().contains(&key.protocol) {
+        return false;
+    }
+
+    // ── IP address / CIDR ─────────────────────────────────────────────────
+    if !b.src_ips().is_empty() && !b.src_ips().iter().any(|n| n.contains(key.src_ip)) {
+        return false;
+    }
+    if !b.dst_ips().is_empty() && !b.dst_ips().iter().any(|n| n.contains(key.dst_ip)) {
+        return false;
+    }
+    if !b.ips().is_empty()
+        && !b
+            .ips()
+            .iter()
+            .any(|n| n.contains(key.src_ip) || n.contains(key.dst_ip))
+    {
+        return false;
+    }
+
+    // ── Port (TCP / UDP only; silently ignored for other protocols) ────────
+    if matches!(key.protocol, 6 | 17) {
+        if !b.src_ports().is_empty() && !b.src_ports().iter().any(|r| r.contains(key.src_port)) {
+            return false;
+        }
+        if !b.dst_ports().is_empty() && !b.dst_ports().iter().any(|r| r.contains(key.dst_port)) {
+            return false;
+        }
+        if !b.ports().is_empty()
+            && !b
+                .ports()
+                .iter()
+                .any(|r| r.contains(key.src_port) || r.contains(key.dst_port))
+        {
+            return false;
+        }
+    }
+
+    // ── Flow ID ───────────────────────────────────────────────────────────
+    if !b.flow_ids().is_empty() {
+        let id = key.flow_id(b.unidirectional());
+        if !b.flow_ids().contains(&id) {
+            return false;
+        }
+    }
+
+    // ── TCP flags (protocol 6 only) ────────────────────────────────────────
+    if let Some(ff) = b.tcp_flags()
+        && key.protocol == 6
+        && !ff.matches(meta.tcp_flags)
+    {
+        return false;
+    }
+
+    true
+}
+
 // ── Filter ───────────────────────────────────────────────────────────────────
 
 /// Compiled structured packet filter.
 ///
-/// ## Composition rules
+/// ## Flat-body composition (within the base filter)
 ///
-/// - Multiple values within the same category are **OR**-ed:
-///   two `src_ips` entries keep packets matching **either** network.
-/// - Values across different categories are **AND**-ed:
-///   a packet must satisfy the protocol filter **and** the IP filter **and**
-///   the port filter, etc.
-/// - An empty category (zero values / `None`) places no constraint.
+/// - Multiple values within the same category are **OR**-ed.
+/// - Values across different categories are **AND**-ed.
+/// - An empty category places no constraint.
 ///
-/// Filters are evaluated during the **second pass** of the sort pipeline,
-/// after chronological sorting, before output.
+/// ## Global negation
+///
+/// When `negate` is `true` the entire result of the flat-body evaluation
+/// (and the rule chain, if any) is inverted.  Use `--not` on the CLI.
+///
+/// ## Rule chain
+///
+/// `rules` is an ordered list of [`FilterRule`]s evaluated left-to-right
+/// after the base body. Each rule carries an [`Op`] that controls how it
+/// combines with the accumulated result:
+///
+/// - `Op::And` — `acc = acc AND rule.matches(pkt)` (default)
+/// - `Op::Or`  — `acc = acc OR rule.matches(pkt)`
+/// - `Op::Not` — `acc = acc AND NOT rule.matches(pkt)`
+///
+/// An empty `rules` list (the default) has no effect.
 #[derive(Debug, Default, Clone)]
 pub struct Filter {
+    /// When `true`, the entire filter result is inverted.
+    pub negate: bool,
+
+    /// Additional rules chained after the base body.
+    pub rules: Vec<FilterRule>,
+
     /// IP protocol numbers to match. Empty = any protocol.
     pub protocols: Vec<u8>,
 
@@ -456,10 +685,16 @@ pub struct Filter {
     pub unidirectional: bool,
 }
 
+impl_filter_body!(Filter);
+
 impl Filter {
-    /// Return `true` if no constraints are set (matches every packet).
+    /// Return `true` if the filter places no constraints (matches every packet).
+    ///
+    /// A filter with `negate = true` or a non-empty `rules` list is never empty.
     pub fn is_empty(&self) -> bool {
-        self.protocols.is_empty()
+        !self.negate
+            && self.rules.is_empty()
+            && self.protocols.is_empty()
             && self.src_ips.is_empty()
             && self.dst_ips.is_empty()
             && self.ips.is_empty()
@@ -476,115 +711,54 @@ impl Filter {
 
     /// Evaluate the filter against `meta`.
     ///
-    /// Returns `true` if the packet passes all active constraints.
+    /// 1. Evaluate the base flat body.
+    /// 2. Apply `negate` to that result.
+    /// 3. Fold over `rules` using each rule's [`Op`].
+    ///
+    /// Returns `true` if the packet passes.
     pub fn matches(&self, meta: &PacketMeta) -> bool {
-        // ── Time range (no parsing needed) ───────────────────────────────────
-        if let Some(from) = self.from_ns
-            && meta.timestamp_ns < from
-        {
-            return false;
-        }
-        if let Some(to) = self.to_ns
-            && meta.timestamp_ns > to
-        {
-            return false;
-        }
-
-        // ── Packet length ────────────────────────────────────────────────────
-        if let Some(min) = self.min_len
-            && meta.captured_len < min
-        {
-            return false;
-        }
-        if let Some(max) = self.max_len
-            && meta.captured_len > max
-        {
-            return false;
-        }
-
-        // Early exit: remaining checks all require a flow key.
-        let need_flow = !self.protocols.is_empty()
-            || !self.src_ips.is_empty()
-            || !self.dst_ips.is_empty()
-            || !self.ips.is_empty()
-            || !self.src_ports.is_empty()
-            || !self.dst_ports.is_empty()
-            || !self.ports.is_empty()
-            || !self.flow_ids.is_empty()
-            || self.tcp_flags.is_some();
-
-        if !need_flow {
-            return true;
-        }
-
-        // Non-IP packets fail any flow-level filter.
-        let key = match &meta.flow_key {
-            Some(k) => k,
-            None => return false,
-        };
-
-        // ── Protocol ─────────────────────────────────────────────────────────
-        if !self.protocols.is_empty() && !self.protocols.contains(&key.protocol) {
-            return false;
-        }
-
-        // ── IP address / CIDR ────────────────────────────────────────────────
-        if !self.src_ips.is_empty() && !self.src_ips.iter().any(|n| n.contains(key.src_ip)) {
-            return false;
-        }
-        if !self.dst_ips.is_empty() && !self.dst_ips.iter().any(|n| n.contains(key.dst_ip)) {
-            return false;
-        }
-        if !self.ips.is_empty()
-            && !self
-                .ips
-                .iter()
-                .any(|n| n.contains(key.src_ip) || n.contains(key.dst_ip))
-        {
-            return false;
-        }
-
-        // ── Port (TCP / UDP only; silently ignored for other protocols) ───────
-        if matches!(key.protocol, 6 | 17) {
-            if !self.src_ports.is_empty()
-                && !self.src_ports.iter().any(|r| r.contains(key.src_port))
-            {
-                return false;
+        let base = eval_body(self, meta);
+        let acc = if self.negate { !base } else { base };
+        self.rules.iter().fold(acc, |acc, rule| {
+            let rule_result = eval_body(rule, meta);
+            match rule.op {
+                Op::And => acc && rule_result,
+                Op::Or => acc || rule_result,
+                Op::Not => acc && !rule_result,
             }
-            if !self.dst_ports.is_empty()
-                && !self.dst_ports.iter().any(|r| r.contains(key.dst_port))
-            {
-                return false;
-            }
-            if !self.ports.is_empty()
-                && !self
-                    .ports
-                    .iter()
-                    .any(|r| r.contains(key.src_port) || r.contains(key.dst_port))
-            {
-                return false;
-            }
-        }
-
-        // ── Flow ID ──────────────────────────────────────────────────────────
-        if !self.flow_ids.is_empty() {
-            let id = key.flow_id(self.unidirectional);
-            if !self.flow_ids.contains(&id) {
-                return false;
-            }
-        }
-
-        // ── TCP flags (protocol 6 only) ───────────────────────────────────────
-        if let Some(flags_filter) = self.tcp_flags
-            && key.protocol == 6
-            && !flags_filter.matches(meta.tcp_flags)
-        {
-            return false;
-        }
-
-        true
+        })
     }
 }
+
+// ── FilterRule ────────────────────────────────────────────────────────────────
+
+/// A single rule in a [`Filter`] rule chain.
+///
+/// All flat-body semantics are identical to the base [`Filter`]: categories
+/// are OR-ed within, AND-ed across.  The [`Op`] field controls how this rule
+/// is combined with the accumulated result.
+#[derive(Debug, Default, Clone)]
+pub struct FilterRule {
+    /// How this rule combines with the accumulated filter result.
+    pub op: Op,
+
+    pub protocols: Vec<u8>,
+    pub src_ips: Vec<IpNet>,
+    pub dst_ips: Vec<IpNet>,
+    pub ips: Vec<IpNet>,
+    pub src_ports: Vec<PortRange>,
+    pub dst_ports: Vec<PortRange>,
+    pub ports: Vec<PortRange>,
+    pub flow_ids: Vec<u64>,
+    pub from_ns: Option<u64>,
+    pub to_ns: Option<u64>,
+    pub tcp_flags: Option<TcpFlagsFilter>,
+    pub min_len: Option<u32>,
+    pub max_len: Option<u32>,
+    pub unidirectional: bool,
+}
+
+impl_filter_body!(FilterRule);
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

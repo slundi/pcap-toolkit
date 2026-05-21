@@ -146,6 +146,7 @@ fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
 fn build_filter(args: &cli::SortArgs) -> Result<Filter> {
     let mut f = Filter {
         unidirectional: args.unidirectional,
+        negate: args.negate,
         ..Filter::default()
     };
 
