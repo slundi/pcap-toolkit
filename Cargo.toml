@@ -31,6 +31,12 @@ targets = [
 
 
 [dependencies]
+etherparse = "0.20.1"
+pcap-parser = "0.17.0"
+rapidhash = "4.4.1"
+rayon = "1.12.0"
+solana_rbpf = "0.8.5"
+toml-span = "0.7.1"
 
 
 [dev-dependencies]

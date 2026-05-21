@@ -12,7 +12,7 @@ This document outlines the milestones and engineering steps planned for the deve
 * [ ] Set repository description and topics on Codeberg
 * [x] Add 5 keywords and up to 5 categories in `Cargo.toml`
 * [x] Set contributing rules in `CONTRIBUTING.md`
-* [ ] Select and add crates to `[dependencies]`
+* [x] Select and add crates to `[dependencies]`
 * [x] Write `AGENT.md` / `CLAUDE.md` to match the project vision
 * [ ] Enable Renovate Bot on Codeberg for automated dependency updates (`renovate.json` is ready)
 
@@ -89,7 +89,7 @@ Filters are evaluated during the second pass, after sorting, before any output o
 ### BPF Expression Filter
 
 - [ ] `--filter <expr>` — accept a tcpdump/libpcap-style BPF expression (`"tcp and dst port 443 and src net 10.0.0.0/8"`).
-- [ ] Evaluate with a **pure-Rust BPF implementation** (no `libpcap` linkage required). Spike task: benchmark available crates and pick the most complete and maintained one.
+- [ ] Evaluate with a **pure-Rust BPF implementation** (no `libpcap` linkage required). Spike task: benchmark available crates and pick the most complete and maintained one. (`solana_rbpf` or `etherparse` + rust code)
 - [ ] BPF filter is AND-ed with any structured filters if both are provided.
 - [ ] First-pass optimisation (future): parse BPF expression at startup and skip indexing packets that provably cannot match (e.g. wrong link-layer type).
 
