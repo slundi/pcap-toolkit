@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn example_benchmark(c: &mut Criterion) {
     // Replace with a real benchmark of your code.

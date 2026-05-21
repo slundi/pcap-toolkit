@@ -31,11 +31,16 @@ targets = [
 
 
 [dependencies]
+anyhow = "1.0.102"
+bpaf = "0.9.26"
+chrono = { version = "0.4.44", features = ["serde"] }
 etherparse = "0.20.1"
 pcap-parser = "0.17.0"
 rapidhash = "4.4.1"
 rayon = "1.12.0"
+serde = { version = "1.0.228", features = ["derive"] }
 solana_rbpf = "0.8.5"
+thiserror = "2.0.18"
 toml-span = "0.7.1"
 
 

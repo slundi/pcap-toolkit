@@ -20,15 +20,15 @@ This document outlines the milestones and engineering steps planned for the deve
 
 Core building blocks everything else depends on.
 
-- [ ] Integrate `pcap-parser` for robust PCAP/PCAPng file structure handling.
-- [ ] Integrate `etherparse` for zero-copy layer parsing (Ethernet, IPv4, IPv6, TCP, UDP, ICMP).
-- [ ] Implement the `info` / `stats` CLI command:
+- [x] Integrate `pcap-parser` for robust PCAP/PCAPng file structure handling.
+- [x] Integrate `etherparse` for zero-copy layer parsing (Ethernet, IPv4, IPv6, TCP, UDP, ICMP).
+- [x] Implement the `info` / `stats` CLI command:
   - Capture start and end timestamps (ms precision).
   - Total packet count and total byte volume.
   - Unique source and destination IPs.
   - Flow table: count packets per 5-tuple `(src_ip, dst_ip, src_port, dst_port, protocol)`.
   - All derived without loading payloads into RAM (streaming, single-pass).
-- [ ] Design and implement the TOML configuration system (`serde` + `toml`):
+- [x] Design and implement the TOML configuration system (`serde` + `toml`):
   - Input PCAP file(s) or glob pattern.
   - Output targets: file path(s), format, replay interface.
   - Per-command options (truncation, sorting, timestamp shift, IP mapping).
