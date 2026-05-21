@@ -1,0 +1,160 @@
+# pcap-toolkit example configuration
+#
+# All sections are optional. CLI flags take precedence over config values.
+# Load this file with: pcap-toolkit --config config.example.toml <subcommand>
+
+# ── Input ────────────────────────────────────────────────────────────────────
+# One or more input files. Glob patterns are supported.
+# Multiple [[input]] blocks are merged and sorted together.
+
+[[input]]
+path = "captures/traffic.pcap"
+
+[[input]]
+path = "captures/archive/*.pcap"
+
+# ── Sort ─────────────────────────────────────────────────────────────────────
+# Two-pass chronological sorting. Produces one output file per time slice
+# (or a single file when slice is omitted).
+
+[sort]
+enabled = true
+
+# Split sorted output into separate files by time interval.
+# Accepts: "1h", "30m", "1d", "120s", or a bare integer (seconds).
+slice = "1h"
+
+# ── Filter ────────────────────────────────────────────────────────────────────
+# All conditions within [filter] are AND-ed across categories and OR-ed within
+# the same category. Set negate = true to invert the entire result.
+
+[filter]
+# Keep only these IP protocols. Accepts names or decimal numbers.
+proto = ["tcp", "udp"]
+
+# Source IP filters (OR-ed). Accepts exact addresses or CIDR prefixes.
+src_ip = ["10.0.0.0/8", "172.16.0.0/12"]
+
+# Destination IP filters (OR-ed).
+dst_ip = ["203.0.113.0/24"]
+
+# Either-endpoint IP filters (OR-ed).
+# ip = ["192.168.1.1"]
+
+# Source port filters (OR-ed). Single port or inclusive range.
+src_port = ["1024-65535"]
+
+# Destination port filters (OR-ed).
+dst_port = ["443", "80", "8080"]
+
+# Either-endpoint port filters (OR-ed).
+# port = ["53"]
+
+# Retain only packets belonging to these flow IDs (hex, comma-separated).
+# flow_id = ["deadbeef01234567", "0xcafe1234"]
+
+# Time window — RFC 3339 datetime or millisecond epoch integer.
+from = "2024-01-15T00:00:00Z"
+to   = "2024-01-15T23:59:59Z"
+
+# TCP flags filter. Supported flags: SYN, ACK, FIN, RST, PSH, URG, ECE, CWR.
+# Append ":exact" to require an exact bitmask match (no extra flags allowed).
+# tcp_flags = "SYN+ACK"
+# tcp_flags = "RST:exact"
+
+# Packet length bounds (captured length, after any truncation).
+min_len = 64
+max_len = 1500
+
+# Use unidirectional flow IDs (A→B ≠ B→A).
+# Default is bidirectional (A→B == B→A).
+unidirectional = false
+
+# Invert the entire filter result: keep packets that do NOT match.
+negate = false
+
+# ── Filter rules (advanced logical composition) ───────────────────────────────
+# Chain additional rules after the base [filter] block.
+# op = "and" (default) — result AND rule
+# op = "or"            — result OR rule
+# op = "not"           — result AND NOT rule
+# Each rule supports the same fields as [filter] (proto, src_ip, dst_port, …).
+
+[[filter.rules]]
+op    = "or"
+proto = ["icmp", "icmp6"]
+
+[[filter.rules]]
+op     = "not"
+dst_ip = ["10.99.0.0/16"]
+
+# ── Transform ─────────────────────────────────────────────────────────────────
+# Packet-level modifications applied after filtering, before output or replay.
+
+[transform]
+# Global payload truncation: keep at most N bytes of payload per packet.
+# Ethernet, IP, and transport headers are always preserved.
+# Per-protocol rules below take precedence over this global limit.
+max_payload_bytes = 512
+
+# Shift all timestamps so the capture starts at this datetime.
+# Accepts RFC 3339 or millisecond epoch integer.
+# timestamp_start = "2024-06-01T00:00:00Z"
+
+# IP address replacement rules. Same address family only (IPv4↔IPv4, IPv6↔IPv6).
+# Repeatable — rules are evaluated in order for every packet.
+replace_ip = [
+    "10.0.0.1=192.168.1.1",
+    "10.0.0.2=192.168.1.2",
+]
+
+# Per-protocol payload truncation rules.
+# The first rule whose proto matches the packet wins; falls back to
+# max_payload_bytes above when no rule matches.
+# Accepts protocol names (tcp, udp, icmp, icmp6, sctp) or decimal numbers.
+
+[[transform.truncate_by_proto]]
+proto             = "tcp"
+max_payload_bytes = 128   # keep HTTP/TLS headers but trim large bodies
+
+[[transform.truncate_by_proto]]
+proto             = "udp"
+max_payload_bytes = 64    # enough for a DNS query/response header
+
+# ── Output ────────────────────────────────────────────────────────────────────
+# One or more output targets. Format is inferred from the file extension
+# (.pcap, .jsonl, .parquet, .avro) or set explicitly with `format`.
+
+[[output]]
+format           = "pcap"
+path             = "out/sorted.pcap"
+compress_payload = false
+
+[[output]]
+format           = "parquet"
+path             = "out/traffic.parquet"
+compress_payload = true
+
+# ── Export ────────────────────────────────────────────────────────────────────
+# Structured data export (JSON Lines, Parquet, or Avro).
+# Used by the `export` subcommand.
+
+[export]
+path             = "out/traffic.jsonl"
+# format         = "json"      # override format inferred from extension
+compress_payload = false
+unidirectional   = false
+
+# ── Replay ────────────────────────────────────────────────────────────────────
+# Live packet replay onto a network interface (Linux only, requires CAP_NET_RAW).
+
+[replay]
+interface = "eth0"
+
+# Speed multiplier: 1.0 = real-time, 2.0 = 2× faster, 0.5 = half speed.
+# Ignored when pps is set.
+speed = 1.0
+
+# Fixed replay rate in packets per second.
+# When set, speed is ignored and original inter-packet timing is discarded.
+# pps = 10000
