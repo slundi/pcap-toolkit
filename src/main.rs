@@ -4,6 +4,7 @@ mod cli;
 
 use anyhow::{Context, Result};
 use pcap_toolkit::{
+    bpf,
     config::Config,
     filter::{
         Filter, IpNet, PortRange, TcpFlagsFilter, parse_datetime_ns, parse_flow_ids,
@@ -121,11 +122,20 @@ fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
 
     let filter = build_filter(args)?;
 
+    let bpf_filter = args
+        .filter_expr
+        .as_deref()
+        .map(|expr| {
+            bpf::parse(expr).with_context(|| format!("invalid --filter expression '{expr}'"))
+        })
+        .transpose()?;
+
     let opts = SortOptions {
         output: args.output.clone(),
         slice_secs,
         on_disk: args.on_disk,
         filter,
+        bpf_filter,
     };
 
     let report = sort::sort_file(&args.input, &opts)

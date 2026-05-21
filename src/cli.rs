@@ -82,6 +82,8 @@ pub struct SortArgs {
     pub unidirectional: bool,
     /// Invert the entire filter result (keep packets that do NOT match).
     pub negate: bool,
+    /// tcpdump/libpcap-style BPF expression (e.g. `"tcp and dst port 443"`).
+    pub filter_expr: Option<String>,
 }
 
 fn config_opt() -> impl Parser<Option<PathBuf>> {
@@ -196,6 +198,11 @@ fn sort_cmd() -> impl Parser<Command> {
     let negate = long("not")
         .help("Invert the filter: keep packets that do NOT match the filter rules")
         .switch();
+    let filter_expr = long("filter")
+        .short('f')
+        .help("tcpdump/libpcap BPF expression, e.g. \"tcp and dst port 443\"")
+        .argument::<String>("EXPR")
+        .optional();
 
     construct!(SortArgs {
         on_disk,
@@ -216,6 +223,7 @@ fn sort_cmd() -> impl Parser<Command> {
         max_len,
         unidirectional,
         negate,
+        filter_expr,
         input,
     })
     .to_options()

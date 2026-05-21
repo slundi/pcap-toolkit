@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use pcap_parser::traits::PcapReaderIterator;
 use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError};
 
+use crate::bpf::BpfExpr;
 use crate::error::SortError;
 use crate::filter::{Filter, PacketMeta};
 use index::{IndexStore, PacketIndex, read_packet_at, sidecar_path};
@@ -38,8 +39,10 @@ pub struct SortOptions {
     pub slice_secs: Option<u64>,
     /// When `true`, write the index to a `.idx` sidecar file instead of RAM.
     pub on_disk: bool,
-    /// Packet filter applied during the second pass. Default matches all packets.
+    /// Structured packet filter applied during the second pass.
     pub filter: Filter,
+    /// BPF expression filter AND-ed with `filter`. `None` = no BPF filter.
+    pub bpf_filter: Option<BpfExpr>,
 }
 
 /// Summary returned by [`sort_file`] on success.
@@ -216,13 +219,19 @@ fn second_pass(
 
     let mut writer = SlicedWriter::new(opts.output.clone(), header, opts.slice_secs);
 
-    let has_filter = !opts.filter.is_empty();
+    let has_filter = !opts.filter.is_empty() || opts.bpf_filter.is_some();
     for entry in sorted {
         let (origlen, data) =
             read_packet_at(&mut src, entry.byte_offset, entry.caplen, big_endian)?;
         if has_filter {
             let meta = PacketMeta::from_packet(entry.timestamp_ns, entry.caplen, &data);
-            if !opts.filter.matches(&meta) {
+            let structured_pass = opts.filter.is_empty() || opts.filter.matches(&meta);
+            let bpf_pass = opts
+                .bpf_filter
+                .as_ref()
+                .map(|b| b.eval(&meta))
+                .unwrap_or(true);
+            if !structured_pass || !bpf_pass {
                 continue;
             }
         }

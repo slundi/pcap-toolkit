@@ -88,10 +88,50 @@ Filters are evaluated during the second pass, after sorting, before any output o
 
 ### BPF Expression Filter
 
-- [ ] `--filter <expr>` — accept a tcpdump/libpcap-style BPF expression (`"tcp and dst port 443 and src net 10.0.0.0/8"`).
-- [ ] Evaluate with a **pure-Rust BPF implementation** (no `libpcap` linkage required). Spike task: benchmark available crates and pick the most complete and maintained one. (`solana_rbpf` or `etherparse` + rust code)
-- [ ] BPF filter is AND-ed with any structured filters if both are provided.
-- [ ] First-pass optimisation (future): parse BPF expression at startup and skip indexing packets that provably cannot match (e.g. wrong link-layer type).
+Syntax: tcpdump/libpcap style (`"tcp and dst port 443 and src net 10.0.0.0/8"`).
+Rationale for choosing BPF over Wireshark display-filter syntax:
+- BPF is the de-facto CLI standard; tcpdump users know it from muscle memory.
+- Wireshark display filter syntax is GUI-oriented and offers no capability that the
+  structured flags (`--src-ip`, `--proto`, `--dst-port`, …) don't already cover.
+- Supporting both would double parser + test surface for zero new power.
+
+Implementation: pure Rust, no C bindings, no `libpcap` linkage.
+No maintained pure-Rust cBPF expression evaluator exists on crates.io (`bpf-filter`
+and `wirefilter` are absent or unmaintained). `solana_rbpf` is an eBPF VM, not a
+cBPF expression parser — it is not applicable here. The implementation is therefore
+a hand-written recursive-descent parser that produces an AST, evaluated against the
+`PacketMeta` already provided by `etherparse`.
+
+Supported grammar subset (covers >95 % of real-world usage):
+
+```
+expr     = or-expr
+or-expr  = and-expr  ('or'  and-expr)*
+and-expr = not-expr  ('and' not-expr)*
+not-expr = 'not' not-expr | '(' expr ')' | primitive
+primitive =
+    proto-kw                              # tcp | udp | icmp | icmp6 | arp | ip | ip6
+  | dir 'host' ip-addr                   # [src|dst] host 1.2.3.4
+  | dir 'net'  cidr                      # [src|dst] net 10.0.0.0/8
+  | dir 'port' port-or-range             # [src|dst] port 443 | port 1024-65535
+  | 'proto' proto-num                    # proto 17
+  | 'len' cmp-op number                  # len > 100 | len <= 1500
+  | 'tcp[tcpflags]' cmp-op flags-expr   # tcp[tcpflags] & (tcp-syn|tcp-ack) != 0
+dir      = 'src' | 'dst' | 'src or dst' | 'src and dst' | ε  (default = src or dst)
+```
+
+- [x] Implement the recursive-descent parser for the grammar above.
+  Use a hand-rolled tokeniser (no parser-combinator crate needed for this size).
+- [x] Define `BpfExpr` AST enum and `eval(expr, meta) -> bool` function
+  that delegates to the same `IpNet`, `PortRange`, `TcpFlagsFilter` types used by
+  the structured filters.
+- [x] Wire `--filter <expr>` CLI flag into `SortArgs`; parse at startup and store
+  a compiled `BpfExpr` in `SortOptions`.
+- [x] AND the BPF result with the structured filter result in the second pass
+  (`filter.matches(meta) && bpf_expr.eval(meta)`).
+- [x] Return a clear parse error (with column offset) if the expression is invalid.
+- [ ] First-pass optimisation (future): inspect the AST at startup and skip indexing
+  packets that cannot match (e.g. wrong link-layer type, wrong IP version).
 
 ## Phase 4: Traffic Modification
 

@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use pcap_toolkit::bpf;
 use pcap_toolkit::filter::{Filter, FilterRule, IpNet, Op, PortRange};
 use pcap_toolkit::flow::FlowKey;
 use pcap_toolkit::sort::{SortOptions, parse_slice, sort_file};
@@ -64,9 +65,7 @@ fn test_sort_already_sorted_produces_identical_output() {
 
     let opts = SortOptions {
         output: output.clone(),
-        slice_secs: None,
-        on_disk: false,
-        filter: Filter::default(),
+        ..SortOptions::default()
     };
     let report = sort_file(&input, &opts).unwrap();
 
@@ -99,9 +98,7 @@ fn test_sort_out_of_order_reorders_packets() {
 
     let opts = SortOptions {
         output: output.clone(),
-        slice_secs: None,
-        on_disk: false,
-        filter: Filter::default(),
+        ..SortOptions::default()
     };
     let report = sort_file(&input, &opts).unwrap();
     assert_eq!(report.packets_written, 3);
@@ -129,9 +126,8 @@ fn test_sort_on_disk_index_produces_same_result() {
 
     let opts = SortOptions {
         output: output.clone(),
-        slice_secs: None,
         on_disk: true,
-        filter: Filter::default(),
+        ..SortOptions::default()
     };
     let report = sort_file(&input, &opts).unwrap();
     assert_eq!(report.packets_written, 3);
@@ -168,8 +164,7 @@ fn test_sort_with_time_slice() {
     let opts = SortOptions {
         output: out_dir.clone(),
         slice_secs: Some(3600),
-        on_disk: false,
-        filter: Filter::default(),
+        ..SortOptions::default()
     };
     let report = sort_file(&input, &opts).unwrap();
 
@@ -196,9 +191,7 @@ fn test_sort_empty_pcap() {
 
     let opts = SortOptions {
         output: output.clone(),
-        slice_secs: None,
-        on_disk: false,
-        filter: Filter::default(),
+        ..SortOptions::default()
     };
     let report = sort_file(&input, &opts).unwrap();
     assert_eq!(report.packets_written, 0);
@@ -547,6 +540,67 @@ fn test_filter_not_rule_excludes_subset() {
     assert_eq!(
         report.packets_written, 1,
         "only the non-port-80 packet should pass"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_bpf_filter_tcp_and_dst_port() {
+    let tcp443 = eth_ipv4_tcp([10, 0, 0, 1], [8, 8, 8, 8], 5000, 443, 0x02, &[0u8; 4]);
+    let tcp80 = eth_ipv4_tcp([10, 0, 0, 1], [8, 8, 8, 8], 5001, 80, 0x02, &[0u8; 4]);
+    let udp = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 5002, 443, &[0u8; 4]);
+
+    let pcap_data = build_pcap(&[(1, 0, tcp443), (2, 0, tcp80), (3, 0, udp)]);
+    let input = write_tmp_pcap("bpf_tcp_dport_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("bpf_tcp_dport_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        bpf_filter: Some(bpf::parse("tcp and dst port 443").unwrap()),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 1,
+        "only TCP dst-port-443 should pass"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_bpf_filter_combined_with_structured() {
+    // Structured filter: src IP 10.0.0.0/8
+    // BPF filter: "dst port 443"
+    // Only the TCP/443 packet from 10.x should pass both.
+    let tcp443_inside = eth_ipv4_tcp([10, 0, 0, 1], [8, 8, 8, 8], 5000, 443, 0x02, &[0u8; 4]);
+    let tcp443_outside = eth_ipv4_tcp([1, 2, 3, 4], [8, 8, 8, 8], 5001, 443, 0x02, &[0u8; 4]);
+    let tcp80_inside = eth_ipv4_tcp([10, 0, 0, 2], [8, 8, 8, 8], 5002, 80, 0x02, &[0u8; 4]);
+
+    let pcap_data = build_pcap(&[
+        (1, 0, tcp443_inside),
+        (2, 0, tcp443_outside),
+        (3, 0, tcp80_inside),
+    ]);
+    let input = write_tmp_pcap("bpf_combined_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("bpf_combined_out.pcap");
+
+    let mut filter = Filter::default();
+    filter.src_ips = vec![IpNet::parse("10.0.0.0/8").unwrap()];
+
+    let opts = SortOptions {
+        output: output.clone(),
+        filter,
+        bpf_filter: Some(bpf::parse("dst port 443").unwrap()),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 1,
+        "only 10.x→443 packet passes both filters"
     );
 
     let _ = std::fs::remove_file(&input);
