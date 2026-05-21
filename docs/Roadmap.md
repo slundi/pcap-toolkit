@@ -166,11 +166,11 @@ Send a (possibly filtered, modified, sorted, or time-shifted) capture onto a rea
 
 ## Phase 7: Performance & Scale
 
-- [ ] Benchmark against `tcpreplay` / `tshark` on large datasets (1 GB, 10 GB, 100 GB).
-- [ ] Parallelise the first-pass index build across multiple input files using `Rayon`.
-- [ ] Evaluate SPSC (single-producer / multi-consumer) channel between the reader and export workers to maximise throughput on multi-core systems.
-- [ ] First-pass pre-filter: skip indexing packets that cannot match active structured filters (protocol, IP, port checks are cheap at index time).
-- [ ] Profile and optimise hot paths with `perf` / `flamegraph` before committing to any architectural change.
+- [ ] 7.1 Benchmark against `tcpreplay` / `tshark` on large datasets (1 GB, 10 GB, 100 GB).
+- [ ] 7.2 Parallelise the first-pass index build across multiple input files using `Rayon`.
+- [ ] 7.3 Evaluate SPSC (single-producer / multi-consumer) channel between the reader and export workers to maximise throughput on multi-core systems.
+- [ ] 7.4 First-pass pre-filter: skip indexing packets that cannot match active structured filters (protocol, IP, port checks are cheap at index time).
+- [ ] 7.5 Profile and optimise hot paths with `perf` / `flamegraph` before committing to any architectural change.
 
 ## Ideas & Future Work
 
@@ -183,6 +183,60 @@ Items not yet scoped — open for discussion before implementation.
 - **Flow count threshold filter**: only include flows with ≥ N packets, filtering out noise and single-packet anomalies.
 - **Payload content filter**: byte pattern or regex match inside the packet payload. Powerful for finding specific application-layer markers but costly — evaluate impact before implementing.
 - **zstd compression on RAW data**: (examples: Apache Parquet + Zstd (standard), Apache Avro + Zstd (The Streaming Choice))
-- **output/export buffer writer**: BuffWriter from rust. Writing to the disk packet by packet is one of the quickest ways to kill performance.
-- **multiple output/export**
+
+- **I/O buffer tuning**: `BufWriter` is already used in the JSON and PCAP sort writers, but both use the default 8 KB internal capacity. At 8 KB, the JSON writer flushes roughly every 20–40 packet records; the PCAP sort writer flushes every 5–130 packets depending on frame size. Both should be raised to `BufWriter::with_capacity(64 * 1024, file)` (64 KB), cutting write syscalls by ~8×. The Parquet and Avro writers write directly to `File` without a `BufWriter`, which is intentional: the `parquet` crate buffers internally per row group (4 096 rows) and `apache-avro` buffers per Avro block — adding a second layer would double-buffer with no gain. The only actionable change is adjusting the two explicit `BufWriter::new(…)` call sites.
+
+- **Multiple simultaneous outputs (fan-out export)**: currently `export_file()` in `src/export/mod.rs` makes two passes over the data — one to collect a `Vec<PacketRecord>` in RAM, then one dispatch to a single writer. For large captures this means the entire packet set lives in memory and a second run is needed to produce a different format. The fix is a streaming, multi-sink pipeline:
+
+  **`PacketSink` trait** — a common push interface for all format writers:
+  ```rust
+  pub trait PacketSink {
+      fn write(&mut self, record: &PacketRecord) -> Result<(), ExportError>;
+      fn close(&mut self) -> Result<u64, ExportError>; // returns packet count
+  }
+  ```
+  Concrete impls:
+  - `JsonSink` — wraps `BufWriter<File>` (64 KB), writes one JSONL line per `write()` call.
+  - `ParquetSink` — accumulates an internal `Vec<PacketRecord>` of up to `BATCH_SIZE` (4 096) rows; flushes a row group in `write()` when full, flushes the remainder in `close()`. The underlying `SerializedFileWriter<File>` stays unwrapped.
+  - `AvroSink` — thin wrapper around `apache_avro::Writer<File>`; calls `append_ser()` per record, `flush()` in `close()`. The underlying `Writer` is unwrapped.
+  - `PcapSink` — wraps `SlicedWriter` for round-trip PCAP output with optional time-slicing. (Useful for `sort` fan-out, see below.)
+
+  **`MultiExportOptions`** — replaces the single-path `ExportOptions`:
+  ```rust
+  pub struct OutputTarget {
+      pub path:             PathBuf,
+      pub format:           Option<ExportFormat>, // None → infer from extension
+      pub compress_payload: bool,
+  }
+
+  pub struct MultiExportOptions {
+      pub targets:       Vec<OutputTarget>,
+      pub filter:        Filter,
+      pub bpf_filter:    Option<BpfExpr>,
+      pub unidirectional: bool,
+  }
+  ```
+
+  **Streaming loop** in `export_multi()`:
+  ```
+  open pcap → for each packet:
+      build PacketMeta → apply filter → build PacketRecord →
+          for sink in &mut sinks { sink.write(&record)?; }
+  for sink in sinks { sink.close()?; }
+  ```
+  No `Vec<PacketRecord>` accumulator. Memory usage is O(buffer sizes) — fixed overhead regardless of capture size.
+
+  **CLI**: the `export` subcommand gains `--output` as a repeatable flag:
+  ```
+  pcap-toolkit export capture.pcap \
+      --output out.jsonl \
+      --output out.parquet \
+      --output out.avro
+  ```
+  TOML gains an `[[export.outputs]]` array replacing the single `[export]` table.
+
+  **Sort fan-out**: `SortOptions` gains an optional `Vec<OutputTarget>` so a sorted pass can simultaneously write the sorted PCAP *and* a JSONL/Parquet export without a second read.
+
+  **Backward compatibility**: `ExportOptions` (single output) is kept as a thin wrapper that constructs a `MultiExportOptions` with one target, so existing code paths and tests are unaffected.
+
 - **replay on multiple interfaces**
