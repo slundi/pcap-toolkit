@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Solid Dark Terminal Background -->
+  <rect width="256" height="256" fill="#1E1E1E" rx="36"/>
+
+  <!-- Left Side: Binary Matrix Input (From Concept 1) -->
+  <circle cx="16" cy="95" r="8" fill="#4A4A4A"/>
+  <circle cx="40" cy="95" r="8" fill="#4A4A4A"/>
+  <circle cx="64" cy="95" r="8" fill="#BBBBBB"/>
+  <circle cx="16" cy="128" r="8" fill="#BBBBBB"/>
+  <circle cx="40" cy="128" r="8" fill="#BBBBBB"/>
+  <circle cx="64" cy="128" r="8" fill="#4A4A4A"/>
+  <circle cx="16" cy="161" r="8" fill="#BBBBBB"/>
+  <circle cx="40" cy="161" r="8" fill="#4A4A4A"/>
+  <circle cx="64" cy="161" r="8" fill="#BBBBBB"/>
+
+  <!-- Center: True Rotated Funnel / Play Engine -->
+  <!-- A 6-point polygon creating a clear horizontal funnel profile -->
+  <polygon points="92,85 132,112 152,112 166,128 152,144 132,144 92,171" fill="#00E5FF"/>
+  <!-- Accent line defining the mouth filter rim -->
+  <line x1="92" y1="85" x2="92" y2="171" stroke="#00B8D4" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Right Side: Structured JSON Brace & Data Nodes (From Concept 3) -->
+  <text x="175" y="155" font-family="monospace" font-size="96" font-weight="bold" fill="#E0E0E0">{</text>
+  <circle cx="240" cy="94" r="8" fill="#FFCA28"/>
+  <circle cx="241" cy="158" r="8" fill="#FFCA28"/>
+</svg>
