@@ -137,22 +137,22 @@ dir      = 'src' | 'dst' | 'src or dst' | 'src and dst' | ε  (default = src or 
 
 Packet-level transformations applied during the second pass before writing or replaying.
 
-- [ ] **Payload Truncation**: `--max-payload-bytes N` — keep only the first N bytes of each packet's payload (preserves Ethernet + IP + transport headers). Useful for reducing storage while retaining all header metadata for analysis.
-- [ ] **Timestamp Shifting**: accept a target start datetime (ms epoch) and shift all timestamps by the computed delta so the capture starts at the requested time.
-- [ ] **IP Address Mapping**: replace IP addresses in packet headers according to a mapping table (e.g. `--replace-ip 10.0.0.1=192.168.1.1`), configurable in TOML.
+- [x] **Payload Truncation**: `--max-payload-bytes N` — keep only the first N bytes of each packet's payload (preserves Ethernet + IP + transport headers). Useful for reducing storage while retaining all header metadata for analysis.
+- [x] **Timestamp Shifting**: accept a target start datetime (ms epoch) and shift all timestamps by the computed delta so the capture starts at the requested time.
+- [x] **IP Address Mapping**: replace IP addresses in packet headers according to a mapping table (e.g. `--replace-ip 10.0.0.1=192.168.1.1`), configurable in TOML.
   - Same address-family replacements (IPv4→IPv4, IPv6→IPv6) are straightforward.
   - Cross-family mapping (IPv4↔IPv6) requires re-framing the Ethernet payload and is tracked separately (see Ideas below).
-- [ ] **Checksum Recalculation**: after any header modification, recompute Layer 3 (IP) and Layer 4 (TCP/UDP) checksums to keep packets valid for network stacks and replay targets.
+- [x] **Checksum Recalculation**: after any header modification, recompute Layer 3 (IP) and Layer 4 (TCP/UDP) checksums to keep packets valid for network stacks and replay targets.
 
 ## Phase 5: Structured Data Export (SIEM & Data Lakes)
 
 Turn raw packets into queryable columnar or document data.
 
-- [ ] **JSON export**: one JSON object per packet embedding parsed layer fields, flow ID, flow metadata, and raw payload encoded as Base64 or hex.
-- [ ] **Payload compression**: optional Zstd compression of the raw payload field inside JSON/Parquet to cut storage significantly.
-- [ ] **Apache Parquet export**: columnar output using a typed schema (timestamps, IPs as integers, ports, flags, flow ID, payload bytes). Parallelise row-group encoding with `Rayon`.
-- [ ] **Apache Avro export**: schema-first encoding; include the Avro schema file alongside the output for self-describing datasets.
-- [ ] Wire all export formats to the TOML config (output path, compression level, schema options).
+- [x] **JSON export**: one JSON object per packet embedding parsed layer fields, flow ID, flow metadata, and raw payload encoded as Base64. Output is JSONL (newline-delimited JSON, `.jsonl`).
+- [x] **Payload compression**: optional Zstd compression of the raw payload field (JSON: per-field `zstd+base64`; Parquet: ZSTD column compression; Avro: file-level ZSTD codec). Enabled via `--compress-payload`.
+- [x] **Apache Parquet export**: columnar output using a typed schema (timestamp_ns INT64, IPs as STRING, ports/protocol/flags INT32, flow_id INT64, payload BYTE_ARRAY). Uses `parquet` crate with SNAPPY (default) or ZSTD column compression.
+- [x] **Apache Avro export**: schema-first encoding using `apache-avro`; the Avro schema (`.avsc`) is written alongside the data file for self-describing datasets. Supports ZSTD codec.
+- [x] Wire all export formats to the TOML config (`[export]` table: `path`, `format`, `compress_payload`, `unidirectional`) and CLI (`export` subcommand with full filter flag parity with `sort`).
 
 ## Phase 6: Live Replay
 
@@ -160,6 +160,7 @@ Send a (possibly filtered, modified, sorted, or time-shifted) capture onto a rea
 
 - [ ] Implement the `replay` command: read packets from the second-pass pipeline and transmit them via a raw socket (`socket2` or `AF_PACKET` on Linux).
 - [ ] Honour original inter-packet timing or support a speed multiplier (`--speed 2.0`, `--speed max`).
+- [ ] Paquet per second `-pps 4096` that will ignore previous inter-packet timing.
 - [ ] Accept replay interface from CLI flag or TOML config.
 - [ ] Graceful permission check: detect missing `CAP_NET_RAW` and emit a clear error.
 
@@ -183,3 +184,4 @@ Items not yet scoped — open for discussion before implementation.
 - **Payload content filter**: byte pattern or regex match inside the packet payload. Powerful for finding specific application-layer markers but costly — evaluate impact before implementing.
 - **zstd compression on RAW data**: (examples: Apache Parquet + Zstd (standard), Apache Avro + Zstd (The Streaming Choice))
 - **output/export buffer writer**: BuffWriter from rust. Writing to the disk packet by packet is one of the quickest ways to kill performance.
+- **multiple output/export**

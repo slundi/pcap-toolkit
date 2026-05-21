@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use pcap_toolkit::{
     bpf,
     config::Config,
+    export::{self, ExportFormat, ExportOptions},
     filter::{
         Filter, IpNet, PortRange, TcpFlagsFilter, parse_datetime_ns, parse_flow_ids,
         parse_proto_list,
@@ -13,6 +14,7 @@ use pcap_toolkit::{
     pcap,
     sort::{self, SortOptions},
     stats::{CaptureInfo, StatsCollector},
+    transform::{TransformOptions, parse_ip_mapping},
 };
 
 fn main() -> Result<()> {
@@ -29,6 +31,7 @@ fn main() -> Result<()> {
         cli::Command::Info(a) => cmd_info(&a),
         cli::Command::Stats(a) => cmd_stats(&a),
         cli::Command::Sort(a) => cmd_sort(&a),
+        cli::Command::Export(a) => cmd_export(&a),
     }
 }
 
@@ -130,12 +133,15 @@ fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
         })
         .transpose()?;
 
+    let transform = build_transform(args)?;
+
     let opts = SortOptions {
         output: args.output.clone(),
         slice_secs,
         on_disk: args.on_disk,
         filter,
         bpf_filter,
+        transform,
     };
 
     let report = sort::sort_file(&args.input, &opts)
@@ -154,6 +160,151 @@ fn cmd_sort(args: &cli::SortArgs) -> Result<()> {
 
 /// Construct a [`Filter`] from the CLI arguments on the `sort` subcommand.
 fn build_filter(args: &cli::SortArgs) -> Result<Filter> {
+    let mut f = Filter {
+        unidirectional: args.unidirectional,
+        negate: args.negate,
+        ..Filter::default()
+    };
+
+    if let Some(proto_str) = &args.proto {
+        f.protocols = parse_proto_list(proto_str)
+            .with_context(|| format!("invalid --proto value '{proto_str}'"))?;
+    }
+
+    for s in &args.src_ip {
+        f.src_ips
+            .push(IpNet::parse(s).with_context(|| format!("invalid --src-ip value '{s}'"))?);
+    }
+    for s in &args.dst_ip {
+        f.dst_ips
+            .push(IpNet::parse(s).with_context(|| format!("invalid --dst-ip value '{s}'"))?);
+    }
+    for s in &args.ip {
+        f.ips
+            .push(IpNet::parse(s).with_context(|| format!("invalid --ip value '{s}'"))?);
+    }
+
+    for s in &args.src_port {
+        f.src_ports
+            .push(PortRange::parse(s).with_context(|| format!("invalid --src-port value '{s}'"))?);
+    }
+    for s in &args.dst_port {
+        f.dst_ports
+            .push(PortRange::parse(s).with_context(|| format!("invalid --dst-port value '{s}'"))?);
+    }
+    for s in &args.port {
+        f.ports
+            .push(PortRange::parse(s).with_context(|| format!("invalid --port value '{s}'"))?);
+    }
+
+    if let Some(ids_str) = &args.flow_id {
+        f.flow_ids = parse_flow_ids(ids_str)
+            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?;
+    }
+
+    if let Some(from_str) = &args.from {
+        f.from_ns = Some(
+            parse_datetime_ns(from_str)
+                .with_context(|| format!("invalid --from value '{from_str}'"))?,
+        );
+    }
+    if let Some(to_str) = &args.to {
+        f.to_ns = Some(
+            parse_datetime_ns(to_str).with_context(|| format!("invalid --to value '{to_str}'"))?,
+        );
+    }
+
+    if let Some(flags_str) = &args.tcp_flags {
+        f.tcp_flags = Some(
+            TcpFlagsFilter::parse(flags_str)
+                .with_context(|| format!("invalid --tcp-flags value '{flags_str}'"))?,
+        );
+    }
+
+    f.min_len = args.min_len;
+    f.max_len = args.max_len;
+
+    Ok(f)
+}
+
+/// Construct a [`TransformOptions`] from the CLI arguments on the `sort` subcommand.
+fn build_transform(args: &cli::SortArgs) -> Result<TransformOptions> {
+    let mut t = TransformOptions {
+        max_payload_bytes: args.max_payload_bytes,
+        ..TransformOptions::default()
+    };
+
+    if let Some(ts_str) = &args.timestamp_start {
+        t.timestamp_start_ns = Some(
+            parse_datetime_ns(ts_str)
+                .with_context(|| format!("invalid --timestamp-start value '{ts_str}'"))?,
+        );
+    }
+
+    for s in &args.replace_ip {
+        t.ip_map.push(
+            parse_ip_mapping(s).with_context(|| format!("invalid --replace-ip value '{s}'"))?,
+        );
+    }
+
+    Ok(t)
+}
+
+fn cmd_export(args: &cli::ExportArgs) -> Result<()> {
+    let filter = build_export_filter(args)?;
+
+    let bpf_filter = args
+        .filter_expr
+        .as_deref()
+        .map(|expr| {
+            bpf::parse(expr).with_context(|| format!("invalid --filter expression '{expr}'"))
+        })
+        .transpose()?;
+
+    let format = args
+        .format
+        .as_deref()
+        .and_then(ExportFormat::parse)
+        .or_else(|| ExportFormat::from_extension(&args.output));
+
+    if format.is_none() && args.format.is_none() {
+        anyhow::bail!(
+            "cannot infer export format from output path '{}'; \
+             use --format json|parquet|avro or choose an extension .jsonl/.parquet/.avro",
+            args.output.display()
+        );
+    }
+    if let Some(s) = &args.format
+        && ExportFormat::parse(s).is_none()
+    {
+        anyhow::bail!(
+            "unknown export format '{}'; expected json, parquet, or avro",
+            s
+        );
+    }
+
+    let opts = ExportOptions {
+        output: args.output.clone(),
+        format,
+        compress_payload: args.compress_payload,
+        filter,
+        bpf_filter,
+        unidirectional: args.unidirectional,
+    };
+
+    let report = export::export_file(&args.input, &opts)
+        .with_context(|| format!("failed to export {}", args.input.display()))?;
+
+    println!(
+        "Exported {} packet(s) to {}",
+        report.packets_written,
+        report.output_path.display()
+    );
+    Ok(())
+}
+
+/// Build a [`Filter`] from the `export` subcommand CLI arguments.
+fn build_export_filter(args: &cli::ExportArgs) -> Result<Filter> {
     let mut f = Filter {
         unidirectional: args.unidirectional,
         negate: args.negate,

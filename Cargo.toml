@@ -32,16 +32,21 @@ targets = [
 
 [dependencies]
 anyhow = "1.0.102"
+apache-avro = { version = "0.21", features = ["zstandard"] }
+base64 = "0.22"
 bpaf = "0.9.26"
 chrono = { version = "0.4.44", features = ["serde"] }
 etherparse = "0.20.1"
+parquet = { version = "53", default-features = false, features = ["zstd", "snap"] }
 pcap-parser = "0.17.0"
 rapidhash = "4.4.1"
 rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
-solana_rbpf = "0.8.5"
+serde_bytes = "0.11"
+serde_json = "1"
 thiserror = "2.0.18"
 toml-span = "0.7.1"
+zstd = "0.13"
 
 
 [dev-dependencies]

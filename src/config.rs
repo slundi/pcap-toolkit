@@ -24,6 +24,9 @@ pub struct Config {
     /// Output targets.
     pub output: Vec<OutputConfig>,
 
+    /// Structured data export options.
+    pub export: ExportConfig,
+
     /// Live replay options.
     pub replay: ReplayConfig,
 }
@@ -121,6 +124,22 @@ pub struct FilterRuleConfig {
     pub unidirectional: bool,
 }
 
+/// Structured data export configuration (`[export]` table in TOML).
+#[derive(Debug, Default)]
+pub struct ExportConfig {
+    /// Output file path (extension determines format: `.jsonl`, `.parquet`, `.avro`).
+    pub path: Option<PathBuf>,
+
+    /// Override output format: `"json"`, `"parquet"`, or `"avro"`.
+    pub format: Option<String>,
+
+    /// Apply Zstd compression to payload bytes.
+    pub compress_payload: bool,
+
+    /// Compute flow IDs unidirectionally (default: bidirectional).
+    pub unidirectional: bool,
+}
+
 /// Output target configuration.
 #[derive(Debug)]
 pub struct OutputConfig {
@@ -164,6 +183,7 @@ impl<'de> Deserialize<'de> for Config {
         let output = th
             .optional::<Vec<OutputConfig>>("output")
             .unwrap_or_default();
+        let export = th.optional::<ExportConfig>("export").unwrap_or_default();
         let replay = th.optional::<ReplayConfig>("replay").unwrap_or_default();
         th.finalize(None)?;
         Ok(Config {
@@ -171,6 +191,7 @@ impl<'de> Deserialize<'de> for Config {
             sort,
             filter,
             output,
+            export,
             replay,
         })
     }
@@ -272,6 +293,23 @@ impl<'de> Deserialize<'de> for FilterRuleConfig {
             tcp_flags,
             min_len,
             max_len,
+            unidirectional,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ExportConfig {
+    fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
+        let mut th = TableHelper::new(value)?;
+        let path = th.optional::<String>("path").map(PathBuf::from);
+        let format = th.optional::<String>("format");
+        let compress_payload = th.optional::<bool>("compress_payload").unwrap_or(false);
+        let unidirectional = th.optional::<bool>("unidirectional").unwrap_or(false);
+        th.finalize(None)?;
+        Ok(ExportConfig {
+            path,
+            format,
+            compress_payload,
             unidirectional,
         })
     }

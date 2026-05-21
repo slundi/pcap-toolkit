@@ -37,6 +37,28 @@ impl From<toml_span::Error> for ConfigError {
     }
 }
 
+/// Errors produced by the structured data exporter.
+#[derive(Debug, Error)]
+pub enum ExportError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("PCAP parse error: {0}")]
+    Parse(String),
+
+    #[error("JSON serialisation error: {0}")]
+    Json(String),
+
+    #[error("Parquet error: {0}")]
+    Parquet(String),
+
+    #[error("Avro error: {0}")]
+    Avro(String),
+
+    #[error("unsupported export format '{0}': expected json, parquet, or avro")]
+    UnknownFormat(String),
+}
+
 /// Errors produced by the two-pass sorter.
 #[derive(Debug, Error)]
 pub enum SortError {

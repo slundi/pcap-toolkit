@@ -21,6 +21,8 @@ pub enum Command {
     Stats(StatsArgs),
     /// Sort a capture chronologically (two-pass indexing).
     Sort(Box<SortArgs>),
+    /// Export packets to JSON, Parquet, or Avro.
+    Export(Box<ExportArgs>),
 }
 
 /// Arguments for the `info` subcommand.
@@ -83,6 +85,61 @@ pub struct SortArgs {
     /// Invert the entire filter result (keep packets that do NOT match).
     pub negate: bool,
     /// tcpdump/libpcap-style BPF expression (e.g. `"tcp and dst port 443"`).
+    pub filter_expr: Option<String>,
+
+    // ── Transform flags ───────────────────────────────────────────────────────
+    /// Truncate each packet's payload to at most N bytes (headers preserved).
+    pub max_payload_bytes: Option<u32>,
+    /// Shift all timestamps so the capture starts at this datetime.
+    pub timestamp_start: Option<String>,
+    /// Replace an IP address: `OLD_IP=NEW_IP`. Repeatable.
+    pub replace_ip: Vec<String>,
+}
+
+/// Arguments for the `export` subcommand.
+#[derive(Debug, Clone)]
+pub struct ExportArgs {
+    /// Input PCAP / PCAPng file.
+    pub input: PathBuf,
+    /// Output file path (extension determines format: .jsonl, .parquet, .avro).
+    pub output: PathBuf,
+    /// Override output format: `json`, `parquet`, or `avro`.
+    pub format: Option<String>,
+    /// Compress payload bytes with Zstd (JSON: per-field; Parquet/Avro: column/file codec).
+    pub compress_payload: bool,
+
+    // ── Filter flags (same as sort) ────────────────────────────────────────
+    /// Comma-separated protocol names or numbers to keep (`tcp,udp,icmp`).
+    pub proto: Option<String>,
+    /// Source IP addresses or CIDRs to keep. Repeatable; values are OR-ed.
+    pub src_ip: Vec<String>,
+    /// Destination IP addresses or CIDRs to keep. Repeatable; values are OR-ed.
+    pub dst_ip: Vec<String>,
+    /// Either-endpoint IP addresses or CIDRs. Repeatable; values are OR-ed.
+    pub ip: Vec<String>,
+    /// Source port or range. Repeatable; values are OR-ed.
+    pub src_port: Vec<String>,
+    /// Destination port or range. Repeatable; values are OR-ed.
+    pub dst_port: Vec<String>,
+    /// Either-endpoint port or range. Repeatable; values are OR-ed.
+    pub port: Vec<String>,
+    /// Comma-separated hex flow IDs to retain.
+    pub flow_id: Option<String>,
+    /// Retain only packets at or after this datetime.
+    pub from: Option<String>,
+    /// Retain only packets at or before this datetime.
+    pub to: Option<String>,
+    /// TCP flags filter (e.g. `SYN`, `SYN+ACK`, `RST:exact`).
+    pub tcp_flags: Option<String>,
+    /// Minimum captured packet length in bytes.
+    pub min_len: Option<u32>,
+    /// Maximum captured packet length in bytes.
+    pub max_len: Option<u32>,
+    /// Compute flow IDs unidirectionally (default: bidirectional).
+    pub unidirectional: bool,
+    /// Invert the entire filter result.
+    pub negate: bool,
+    /// tcpdump/libpcap-style BPF expression.
     pub filter_expr: Option<String>,
 }
 
@@ -204,6 +261,20 @@ fn sort_cmd() -> impl Parser<Command> {
         .argument::<String>("EXPR")
         .optional();
 
+    // ── Transform flags ───────────────────────────────────────────────────────
+    let max_payload_bytes = long("max-payload-bytes")
+        .help("Truncate each packet's payload to at most N bytes (headers preserved)")
+        .argument::<u32>("BYTES")
+        .optional();
+    let timestamp_start = long("timestamp-start")
+        .help("Shift all timestamps so the capture starts at this datetime (RFC 3339 or ms epoch)")
+        .argument::<String>("DATETIME")
+        .optional();
+    let replace_ip = long("replace-ip")
+        .help("Replace an IP address: OLD_IP=NEW_IP (repeatable, same address family only)")
+        .argument::<String>("MAPPING")
+        .many();
+
     construct!(SortArgs {
         on_disk,
         slice,
@@ -224,6 +295,9 @@ fn sort_cmd() -> impl Parser<Command> {
         unidirectional,
         negate,
         filter_expr,
+        max_payload_bytes,
+        timestamp_start,
+        replace_ip,
         input,
     })
     .to_options()
@@ -232,10 +306,119 @@ fn sort_cmd() -> impl Parser<Command> {
     .map(|a| Command::Sort(Box::new(a)))
 }
 
+fn export_cmd() -> impl Parser<Command> {
+    let input = input_arg();
+    let output = long("output")
+        .short('o')
+        .help("Output file path (.jsonl, .parquet, or .avro)")
+        .argument::<PathBuf>("PATH");
+    let format = long("format")
+        .short('F')
+        .help("Override output format: json, parquet, or avro")
+        .argument::<String>("FMT")
+        .optional();
+    let compress_payload = long("compress-payload")
+        .help("Compress payload bytes with Zstd")
+        .switch();
+
+    // ── Filter flags (shared with sort) ──────────────────────────────────────
+    let proto = long("proto")
+        .help("Comma-separated protocols to keep: tcp,udp,icmp,icmp6 or numbers")
+        .argument::<String>("PROTOS")
+        .optional();
+    let src_ip = long("src-ip")
+        .help("Source IP or CIDR to keep (repeatable, OR-ed)")
+        .argument::<String>("CIDR")
+        .many();
+    let dst_ip = long("dst-ip")
+        .help("Destination IP or CIDR to keep (repeatable, OR-ed)")
+        .argument::<String>("CIDR")
+        .many();
+    let ip = long("ip")
+        .help("Either-endpoint IP or CIDR (repeatable, OR-ed)")
+        .argument::<String>("CIDR")
+        .many();
+    let src_port = long("src-port")
+        .help("Source port or range to keep (repeatable)")
+        .argument::<String>("PORT")
+        .many();
+    let dst_port = long("dst-port")
+        .help("Destination port or range to keep (repeatable)")
+        .argument::<String>("PORT")
+        .many();
+    let port = long("port")
+        .help("Either-endpoint port or range (repeatable)")
+        .argument::<String>("PORT")
+        .many();
+    let flow_id = long("flow-id")
+        .help("Comma-separated hex flow IDs to retain")
+        .argument::<String>("IDS")
+        .optional();
+    let from = long("from")
+        .help("Keep packets at or after this datetime (RFC 3339 or ms epoch)")
+        .argument::<String>("DATETIME")
+        .optional();
+    let to = long("to")
+        .help("Keep packets at or before this datetime (RFC 3339 or ms epoch)")
+        .argument::<String>("DATETIME")
+        .optional();
+    let tcp_flags = long("tcp-flags")
+        .help("TCP flags filter, e.g. SYN, SYN+ACK, RST:exact")
+        .argument::<String>("FLAGS")
+        .optional();
+    let min_len = long("min-len")
+        .help("Minimum captured packet length in bytes")
+        .argument::<u32>("BYTES")
+        .optional();
+    let max_len = long("max-len")
+        .help("Maximum captured packet length in bytes")
+        .argument::<u32>("BYTES")
+        .optional();
+    let unidirectional = long("unidirectional")
+        .short('u')
+        .help("Compute flow IDs unidirectionally (default: bidirectional)")
+        .switch();
+    let negate = long("not")
+        .help("Invert the filter: keep packets that do NOT match")
+        .switch();
+    let filter_expr = long("filter")
+        .short('f')
+        .help("tcpdump/libpcap BPF expression, e.g. \"tcp and dst port 443\"")
+        .argument::<String>("EXPR")
+        .optional();
+
+    construct!(ExportArgs {
+        compress_payload,
+        format,
+        output,
+        proto,
+        src_ip,
+        dst_ip,
+        ip,
+        src_port,
+        dst_port,
+        port,
+        flow_id,
+        from,
+        to,
+        tcp_flags,
+        min_len,
+        max_len,
+        unidirectional,
+        negate,
+        filter_expr,
+        input,
+    })
+    .to_options()
+    .descr("Export PCAP packets to JSON, Parquet, or Avro with optional filtering")
+    .command("export")
+    .map(|a| Command::Export(Box::new(a)))
+}
+
 /// Build the top-level argument parser.
 pub fn parser() -> OptionParser<Args> {
     let config = config_opt();
-    let command = construct!([info_cmd(), stats_cmd(), sort_cmd()]);
+    let command = construct!([info_cmd(), stats_cmd(), sort_cmd(), export_cmd()]);
     construct!(Args { config, command })
         .to_options()
         .descr("High-performance PCAP inspection, filtering, sorting, and export tool")

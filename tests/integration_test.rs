@@ -4,9 +4,11 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use pcap_toolkit::bpf;
+use pcap_toolkit::export::{ExportFormat, ExportOptions, export_file};
 use pcap_toolkit::filter::{Filter, FilterRule, IpNet, Op, PortRange};
 use pcap_toolkit::flow::FlowKey;
 use pcap_toolkit::sort::{SortOptions, parse_slice, sort_file};
+use pcap_toolkit::transform::{TransformOptions, parse_ip_mapping};
 
 // ── PCAP builder helpers ─────────────────────────────────────────────────────
 
@@ -214,7 +216,7 @@ fn eth_ipv4_udp(
     payload: &[u8],
 ) -> Vec<u8> {
     let udp_len = (8 + payload.len()) as u16;
-    let total_len = (20 + udp_len) as u16;
+    let total_len = 20 + udp_len;
     let mut frame = Vec::with_capacity(14 + 20 + 8 + payload.len());
     // Ethernet header (14 bytes): dst MAC, src MAC, EtherType=0x0800
     frame.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]); // dst
@@ -607,6 +609,117 @@ fn test_bpf_filter_combined_with_structured() {
     let _ = std::fs::remove_file(&output);
 }
 
+// ── Transform integration tests ───────────────────────────────────────────────
+
+#[test]
+fn test_transform_payload_truncation_reduces_output_size() {
+    // Packets with 100-byte payloads; truncate to 10 bytes.
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0xAA; 100]);
+    let full_frame_len = frame.len(); // 14 + 20 + 8 + 100 = 142
+    let pcap_data = build_pcap(&[(1, 0, frame.clone()), (2, 0, frame)]);
+
+    let input = write_tmp_pcap("transform_trunc_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("transform_trunc_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        transform: TransformOptions {
+            max_payload_bytes: Some(10),
+            ..Default::default()
+        },
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(report.packets_written, 2);
+
+    let out_bytes = std::fs::read(&output).unwrap();
+    // Expected: 24 (global hdr) + 2 × (16 + 52) = 24 + 136 = 160
+    // where 52 = 14 + 20 + 8 + 10
+    let truncated_frame_len = 14 + 20 + 8 + 10;
+    assert!(
+        full_frame_len > truncated_frame_len,
+        "original frame was not larger than truncated"
+    );
+    assert_eq!(out_bytes.len(), 24 + 2 * (16 + truncated_frame_len));
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_transform_ip_mapping_rewrites_address_in_output() {
+    let frame = eth_ipv4_tcp([10, 0, 0, 1], [8, 8, 8, 8], 5000, 443, 0x02, &[0u8; 4]);
+    let pcap_data = build_pcap(&[(1, 0, frame)]);
+
+    let input = write_tmp_pcap("transform_ipmap_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("transform_ipmap_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        transform: TransformOptions {
+            ip_map: vec![parse_ip_mapping("10.0.0.1=192.168.99.1").unwrap()],
+            ..Default::default()
+        },
+        ..SortOptions::default()
+    };
+    sort_file(&input, &opts).unwrap();
+
+    let out_bytes = std::fs::read(&output).unwrap();
+    // The first packet's data starts at byte 40 (24 global hdr + 16 pkt hdr).
+    // IPv4 src IP is at Ethernet(14) + IPv4 src offset(12) = byte 26 within the frame.
+    // In the output file: 40 + 26 = byte 66.
+    let ip_src = &out_bytes[66..70];
+    assert_eq!(ip_src, &[192, 168, 99, 1], "src IP should be rewritten");
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_transform_timestamp_shift_moves_first_packet() {
+    // Two packets at T=10s and T=12s.
+    // Shift so first starts at T=1000s.
+    let frame = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 200, &[0u8; 4]);
+    let pcap_data = build_pcap(&[(10, 0, frame.clone()), (12, 0, frame)]);
+
+    let input = write_tmp_pcap("transform_tsshift_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("transform_tsshift_out.pcap");
+
+    // Target start = 1000s in nanoseconds.
+    let target_ns: u64 = 1000 * 1_000_000_000;
+    let opts = SortOptions {
+        output: output.clone(),
+        transform: TransformOptions {
+            timestamp_start_ns: Some(target_ns),
+            ..Default::default()
+        },
+        ..SortOptions::default()
+    };
+    sort_file(&input, &opts).unwrap();
+
+    let out_bytes = std::fs::read(&output).unwrap();
+    // First packet record starts at byte 24; ts_sec is the first 4 bytes.
+    let first_ts_sec = u32::from_le_bytes(out_bytes[24..28].try_into().unwrap());
+    assert_eq!(first_ts_sec, 1000, "first packet should start at T=1000s");
+
+    // Second packet should be at T=1002s (original gap was 2s).
+    // Output record starts at 24 + 16 + frame_len.
+    let frame_len = 14 + 20 + 8 + 4; // 46
+    let second_pkt_off = 24 + 16 + frame_len;
+    let second_ts_sec = u32::from_le_bytes(
+        out_bytes[second_pkt_off..second_pkt_off + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(
+        second_ts_sec, 1002,
+        "second packet should be 2s after first"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
 #[test]
 fn test_parse_slice_values() {
     assert_eq!(parse_slice("1h").unwrap(), 3600);
@@ -615,4 +728,304 @@ fn test_parse_slice_values() {
     assert_eq!(parse_slice("60s").unwrap(), 60);
     assert_eq!(parse_slice("300").unwrap(), 300);
     assert!(parse_slice("bad").is_err());
+}
+
+// ── Export integration tests ──────────────────────────────────────────────────
+
+#[test]
+fn test_export_json_packet_count() {
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0u8; 8]);
+    let pcap_data = build_pcap(&[
+        (1000, 0, frame.clone()),
+        (1001, 0, frame.clone()),
+        (1002, 0, frame),
+    ]);
+    let input = write_tmp_pcap("export_json_count_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_json_count_out.jsonl");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Json),
+        ..ExportOptions::default()
+    };
+    let report = export_file(&input, &opts).unwrap();
+
+    assert_eq!(report.packets_written, 3);
+    assert!(output.exists());
+
+    // Verify the file contains exactly 3 lines (one JSON object per packet).
+    let content = std::fs::read_to_string(&output).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 3);
+
+    // Each line must parse as valid JSON and contain timestamp_ns.
+    for line in &lines {
+        let v: serde_json::Value = serde_json::from_str(line).expect("line must be valid JSON");
+        assert!(v["timestamp_ns"].is_number());
+        assert_eq!(v["src_ip"], "10.0.0.1");
+        assert_eq!(v["dst_ip"], "8.8.8.8");
+        assert_eq!(v["src_port"], 1234);
+        assert_eq!(v["dst_port"], 53);
+        assert_eq!(v["protocol"], 17); // UDP
+        assert!(v["flow_id"].is_string());
+        assert!(v["payload"].is_string()); // base64-encoded
+        assert_eq!(v["payload_encoding"], "base64");
+    }
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_export_json_timestamps_correct() {
+    let frame = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 200, &[]);
+    let pcap_data = build_pcap(&[(2000, 500_000, frame.clone()), (2001, 0, frame)]);
+    let input = write_tmp_pcap("export_json_ts_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_json_ts_out.jsonl");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Json),
+        ..ExportOptions::default()
+    };
+    export_file(&input, &opts).unwrap();
+
+    let content = std::fs::read_to_string(&output).unwrap();
+    let mut lines = content.lines();
+
+    // ts_sec=2000, ts_usec=500000 → 2000*1e9 + 500000*1000 = 2_000_500_000_000
+    let v0: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    assert_eq!(v0["timestamp_ns"], 2_000_500_000_000u64);
+
+    let v1: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    assert_eq!(v1["timestamp_ns"], 2_001_000_000_000u64);
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_export_json_tcp_flags_present() {
+    // SYN packet (flags = 0x02)
+    let frame = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 12345, 443, 0x02, &[]);
+    let pcap_data = build_pcap(&[(1, 0, frame)]);
+    let input = write_tmp_pcap("export_json_flags_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_json_flags_out.jsonl");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Json),
+        ..ExportOptions::default()
+    };
+    export_file(&input, &opts).unwrap();
+
+    let content = std::fs::read_to_string(&output).unwrap();
+    let v: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+    assert_eq!(v["protocol"], 6); // TCP
+    assert_eq!(v["tcp_flags"], 0x02); // SYN
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_export_json_non_ip_frame_no_flow_fields() {
+    // Raw ARP-like frame (no IP layer): etherparse returns no flow_key.
+    let raw = vec![
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // dst MAC
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // src MAC
+        0x08, 0x06, // EtherType = ARP
+        0x00, 0x01, // hardware type
+        0x08, 0x00, // protocol type
+        0x06, 0x04, // hw/proto size
+        0x00, 0x01, // ARP request
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // sender hw addr
+        0x0a, 0x00, 0x00, 0x01, // sender IP
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // target hw addr
+        0x0a, 0x00, 0x00, 0x02, // target IP
+    ];
+    let pcap_data = build_pcap(&[(1, 0, raw)]);
+    let input = write_tmp_pcap("export_json_arp_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_json_arp_out.jsonl");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Json),
+        ..ExportOptions::default()
+    };
+    export_file(&input, &opts).unwrap();
+
+    let content = std::fs::read_to_string(&output).unwrap();
+    let v: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+    // IP-layer fields must be absent.
+    assert!(v["src_ip"].is_null());
+    assert!(v["dst_ip"].is_null());
+    assert!(v["flow_id"].is_null());
+    assert_eq!(v["caplen"], 42);
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_export_json_with_filter() {
+    let udp_frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0u8; 4]);
+    let tcp_frame = eth_ipv4_tcp([10, 0, 0, 2], [1, 1, 1, 1], 5000, 80, 0x02, &[0u8; 4]);
+    let pcap_data = build_pcap(&[
+        (1, 0, udp_frame),
+        (2, 0, tcp_frame.clone()),
+        (3, 0, tcp_frame),
+    ]);
+    let input = write_tmp_pcap("export_json_filter_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_json_filter_out.jsonl");
+
+    // Keep only TCP packets.
+    let mut filter = Filter::default();
+    filter.protocols = vec![6]; // TCP
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Json),
+        filter,
+        ..ExportOptions::default()
+    };
+    let report = export_file(&input, &opts).unwrap();
+    assert_eq!(report.packets_written, 2);
+
+    let content = std::fs::read_to_string(&output).unwrap();
+    assert_eq!(content.lines().count(), 2);
+    for line in content.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["protocol"], 6);
+    }
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_export_json_compress_payload() {
+    let frame = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 200, &[0xAA; 32]);
+    let pcap_data = build_pcap(&[(1, 0, frame)]);
+    let input = write_tmp_pcap("export_json_zstd_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_json_zstd_out.jsonl");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Json),
+        compress_payload: true,
+        ..ExportOptions::default()
+    };
+    export_file(&input, &opts).unwrap();
+
+    let content = std::fs::read_to_string(&output).unwrap();
+    let v: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+    assert_eq!(v["payload_encoding"], "zstd+base64");
+    // The payload field must be a non-empty string.
+    assert!(v["payload"].as_str().is_some_and(|s| !s.is_empty()));
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_export_parquet_creates_file() {
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0u8; 8]);
+    let pcap_data = build_pcap(&[(1, 0, frame.clone()), (2, 0, frame)]);
+    let input = write_tmp_pcap("export_parquet_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_parquet_out.parquet");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Parquet),
+        ..ExportOptions::default()
+    };
+    let report = export_file(&input, &opts).unwrap();
+
+    assert_eq!(report.packets_written, 2);
+    assert!(output.exists());
+    // Verify the Parquet magic bytes ("PAR1") are present at start and end.
+    let bytes = std::fs::read(&output).unwrap();
+    assert!(bytes.len() >= 8);
+    assert_eq!(&bytes[..4], b"PAR1");
+    assert_eq!(&bytes[bytes.len() - 4..], b"PAR1");
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_export_avro_creates_file_and_schema() {
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0u8; 4]);
+    let pcap_data = build_pcap(&[(1, 0, frame)]);
+    let input = write_tmp_pcap("export_avro_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_avro_out.avro");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Avro),
+        ..ExportOptions::default()
+    };
+    let report = export_file(&input, &opts).unwrap();
+
+    assert_eq!(report.packets_written, 1);
+    assert!(output.exists());
+
+    // Avro magic: "Obj\x01" at start.
+    let bytes = std::fs::read(&output).unwrap();
+    assert!(bytes.len() >= 4);
+    assert_eq!(&bytes[..4], b"Obj\x01");
+
+    // Schema sidecar must exist.
+    let schema_path = output.with_extension("avsc");
+    assert!(schema_path.exists());
+    // Schema file must be valid JSON.
+    let schema_text = std::fs::read_to_string(&schema_path).unwrap();
+    serde_json::from_str::<serde_json::Value>(&schema_text).expect("avsc must be valid JSON");
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(output.with_extension("avsc"));
+}
+
+#[test]
+fn test_export_format_inferred_from_extension() {
+    assert_eq!(
+        ExportFormat::from_extension(std::path::Path::new("out.jsonl")),
+        Some(ExportFormat::Json)
+    );
+    assert_eq!(
+        ExportFormat::from_extension(std::path::Path::new("out.parquet")),
+        Some(ExportFormat::Parquet)
+    );
+    assert_eq!(
+        ExportFormat::from_extension(std::path::Path::new("out.avro")),
+        Some(ExportFormat::Avro)
+    );
+    assert_eq!(
+        ExportFormat::from_extension(std::path::Path::new("out.pcap")),
+        None
+    );
+}
+
+#[test]
+fn test_export_json_empty_pcap_produces_empty_file() {
+    let pcap_data = build_pcap(&[]);
+    let input = write_tmp_pcap("export_json_empty_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_json_empty_out.jsonl");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Json),
+        ..ExportOptions::default()
+    };
+    let report = export_file(&input, &opts).unwrap();
+
+    assert_eq!(report.packets_written, 0);
+    assert!(output.exists());
+    let content = std::fs::read_to_string(&output).unwrap();
+    assert!(content.is_empty());
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
 }

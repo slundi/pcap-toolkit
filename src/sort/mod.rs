@@ -23,6 +23,7 @@ use pcap_parser::{LegacyPcapReader, PcapBlockOwned, PcapError};
 use crate::bpf::BpfExpr;
 use crate::error::SortError;
 use crate::filter::{Filter, PacketMeta};
+use crate::transform::{self, TransformOptions};
 use index::{IndexStore, PacketIndex, read_packet_at, sidecar_path};
 use writer::{GlobalHeader, SlicedWriter};
 
@@ -43,6 +44,8 @@ pub struct SortOptions {
     pub filter: Filter,
     /// BPF expression filter AND-ed with `filter`. `None` = no BPF filter.
     pub bpf_filter: Option<BpfExpr>,
+    /// Packet-level transformations (truncation, timestamp shift, IP mapping).
+    pub transform: TransformOptions,
 }
 
 /// Summary returned by [`sort_file`] on success.
@@ -219,10 +222,22 @@ fn second_pass(
 
     let mut writer = SlicedWriter::new(opts.output.clone(), header, opts.slice_secs);
 
+    // Pre-compute the timestamp delta once from the first sorted packet.
+    let ts_delta: i64 = if let Some(target_ns) = opts.transform.timestamp_start_ns {
+        sorted
+            .first()
+            .map(|p| target_ns as i64 - p.timestamp_ns as i64)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let has_transform = !opts.transform.is_empty();
     let has_filter = !opts.filter.is_empty() || opts.bpf_filter.is_some();
+
     for entry in sorted {
-        let (origlen, data) =
+        let (origlen, mut data) =
             read_packet_at(&mut src, entry.byte_offset, entry.caplen, big_endian)?;
+
         if has_filter {
             let meta = PacketMeta::from_packet(entry.timestamp_ns, entry.caplen, &data);
             let structured_pass = opts.filter.is_empty() || opts.filter.matches(&meta);
@@ -235,7 +250,20 @@ fn second_pass(
                 continue;
             }
         }
-        writer.write_packet(entry.timestamp_ns, entry.caplen, origlen, &data)?;
+
+        let (ts, caplen, new_origlen) = if has_transform {
+            transform::apply(
+                &mut data,
+                entry.timestamp_ns,
+                ts_delta,
+                origlen,
+                &opts.transform,
+            )
+        } else {
+            (entry.timestamp_ns, data.len() as u32, origlen)
+        };
+
+        writer.write_packet(ts, caplen, new_origlen, &data)?;
     }
 
     let (files_written, packets_written) = writer.finish()?;
