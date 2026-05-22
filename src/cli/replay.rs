@@ -8,8 +8,8 @@ use crate::cli::{Command, input_arg};
 pub struct ReplayArgs {
     /// Input PCAP file to replay.
     pub input: PathBuf,
-    /// Network interface to transmit on (e.g. `eth0`, `lo`).
-    pub interface: String,
+    /// Network interfaces to transmit on. Repeatable; each packet is sent to all interfaces.
+    pub interfaces: Vec<String>,
     /// Replay speed: a positive multiplier (`"1.0"`, `"2.0"`) or `"max"` for no delay.
     pub speed: Option<String>,
     /// Fixed replay rate in packets per second (mutually exclusive with `--speed`).
@@ -52,10 +52,13 @@ pub struct ReplayArgs {
 
 pub fn replay_cmd() -> impl Parser<Command> {
     let input = input_arg();
-    let interface = long("interface")
+    let interfaces = long("interface")
         .short('i')
-        .help("Network interface to transmit on (e.g. eth0, lo)")
-        .argument::<String>("IFACE");
+        .help(
+            "Network interface to transmit on (repeatable: each packet is sent to all interfaces)",
+        )
+        .argument::<String>("IFACE")
+        .many();
     let speed = long("speed")
         .help("Replay speed: positive multiplier (1.0 = real-time, 2.0 = 2× faster) or 'max'")
         .argument::<String>("SPEED")
@@ -132,7 +135,7 @@ pub fn replay_cmd() -> impl Parser<Command> {
         .optional();
 
     construct!(ReplayArgs {
-        interface,
+        interfaces,
         speed,
         pps,
         proto,

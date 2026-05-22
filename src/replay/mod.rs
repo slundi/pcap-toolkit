@@ -66,8 +66,9 @@ impl ReplaySpeed {
 
 /// Options for [`replay_file`].
 pub struct ReplayOptions {
-    /// Network interface name (e.g. `"eth0"`, `"lo"`).
-    pub interface: String,
+    /// Network interface names to transmit on (e.g. `["eth0", "eth1"]`).
+    /// Each packet is sent to all interfaces (fan-out).
+    pub interfaces: Vec<String>,
     /// Packet pacing mode.
     pub speed: ReplaySpeed,
     /// Structured filter applied before sending each packet.
@@ -246,7 +247,12 @@ mod platform {
     }
 
     pub fn replay_impl(input: &Path, opts: &ReplayOptions) -> Result<ReplayReport, ReplayError> {
-        let sock = open_raw_socket(&opts.interface)?;
+        let sockets: Vec<Socket> = opts
+            .interfaces
+            .iter()
+            .map(|iface| open_raw_socket(iface))
+            .collect::<Result<_, _>>()?;
+
         let has_filter = !opts.filter.is_empty() || opts.bpf_filter.is_some();
 
         let iter =
@@ -288,7 +294,9 @@ mod platform {
                 std::thread::sleep(delay);
             }
 
-            sock.send(&pkt.data).map_err(ReplayError::Io)?;
+            for sock in &sockets {
+                sock.send(&pkt.data).map_err(ReplayError::Io)?;
+            }
             packets_sent += 1;
             bytes_sent += pkt.data.len() as u64;
         }
@@ -408,7 +416,7 @@ mod tests {
         use crate::filter::Filter;
 
         let opts = ReplayOptions {
-            interface: "nonexistent_iface_xyz999".to_owned(),
+            interfaces: vec!["nonexistent_iface_xyz999".to_owned()],
             speed: ReplaySpeed::Max,
             filter: Filter::default(),
             bpf_filter: None,
@@ -443,7 +451,7 @@ mod tests {
         use crate::filter::Filter;
 
         let opts = ReplayOptions {
-            interface: "eth0".to_owned(),
+            interfaces: vec!["eth0".to_owned()],
             speed: ReplaySpeed::RealTime,
             filter: Filter::default(),
             bpf_filter: None,

@@ -181,8 +181,9 @@ pub struct OutputConfig {
 /// Live replay configuration.
 #[derive(Debug)]
 pub struct ReplayConfig {
-    /// Network interface name for replay.
-    pub interface: Option<String>,
+    /// Network interface names for replay (fan-out: each packet sent to all).
+    /// Accepts `interfaces = ["eth0", "eth1"]` or legacy `interface = "eth0"`.
+    pub interfaces: Vec<String>,
 
     /// Replay speed multiplier (1.0 = real-time, 2.0 = 2× faster).
     /// Ignored when `pps` is set.
@@ -196,7 +197,7 @@ pub struct ReplayConfig {
 impl Default for ReplayConfig {
     fn default() -> Self {
         Self {
-            interface: None,
+            interfaces: Vec::new(),
             speed: 1.0,
             pps: None,
         }
@@ -400,12 +401,21 @@ impl<'de> Deserialize<'de> for OutputConfig {
 impl<'de> Deserialize<'de> for ReplayConfig {
     fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
         let mut th = TableHelper::new(value)?;
-        let interface = th.optional::<String>("interface");
+        // Accept `interfaces = ["eth0", "eth1"]` (preferred) or legacy `interface = "eth0"`.
+        let mut interfaces = th.optional::<Vec<String>>("interfaces").unwrap_or_default();
+        if interfaces.is_empty() {
+            if let Some(single) = th.optional::<String>("interface") {
+                interfaces.push(single);
+            }
+        } else {
+            // consume the legacy key so finalize doesn't error on unknown keys
+            let _ = th.optional::<String>("interface");
+        }
         let speed = th.optional::<f64>("speed").unwrap_or(1.0);
         let pps = th.optional::<u64>("pps");
         th.finalize(None)?;
         Ok(ReplayConfig {
-            interface,
+            interfaces,
             speed,
             pps,
         })
@@ -476,7 +486,7 @@ speed = 2.0
         assert_eq!(config.output.len(), 1);
         assert_eq!(config.output[0].format, "parquet");
         assert_eq!(config.replay.speed, 2.0);
-        assert_eq!(config.replay.interface.as_deref(), Some("eth0"));
+        assert_eq!(config.replay.interfaces, ["eth0"]);
     }
 
     #[test]

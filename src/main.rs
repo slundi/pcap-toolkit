@@ -415,6 +415,9 @@ fn build_export_filter(args: &crate::cli::export::ExportArgs) -> Result<Filter> 
 }
 
 fn cmd_replay(args: &crate::cli::replay::ReplayArgs) -> Result<()> {
+    if args.interfaces.is_empty() {
+        anyhow::bail!("at least one --interface is required");
+    }
     if args.speed.is_some() && args.pps.is_some() {
         anyhow::bail!("--speed and --pps are mutually exclusive; use one or the other");
     }
@@ -442,7 +445,7 @@ fn cmd_replay(args: &crate::cli::replay::ReplayArgs) -> Result<()> {
         .transpose()?;
 
     let opts = ReplayOptions {
-        interface: args.interface.clone(),
+        interfaces: args.interfaces.clone(),
         speed,
         filter,
         bpf_filter,
@@ -451,9 +454,10 @@ fn cmd_replay(args: &crate::cli::replay::ReplayArgs) -> Result<()> {
     let report = replay::replay_file(&args.input, &opts)
         .with_context(|| format!("failed to replay {}", args.input.display()))?;
 
+    let iface_list = args.interfaces.join(", ");
     println!(
         "Replayed {} packet(s) ({} bytes) on {}",
-        report.packets_sent, report.bytes_sent, args.interface
+        report.packets_sent, report.bytes_sent, iface_list
     );
     Ok(())
 }

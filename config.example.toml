@@ -146,10 +146,15 @@ compress_payload = false
 unidirectional   = false
 
 # ── Replay ────────────────────────────────────────────────────────────────────
-# Live packet replay onto a network interface (Linux only, requires CAP_NET_RAW).
+# Live packet replay onto one or more network interfaces (Linux only, requires CAP_NET_RAW).
+# Each packet is sent to all listed interfaces simultaneously (fan-out).
 
 [replay]
-interface = "eth0"
+# Preferred form: array of interfaces.
+interfaces = ["eth0"]
+
+# Single-interface shorthand (equivalent to interfaces = ["eth0"]).
+# interface = "eth0"
 
 # Speed multiplier: 1.0 = real-time, 2.0 = 2× faster, 0.5 = half speed.
 # Ignored when pps is set.
