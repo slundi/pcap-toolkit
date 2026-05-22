@@ -88,7 +88,7 @@ impl PcapWriter {
             std::fs::create_dir_all(parent)?;
         }
         let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
+        let mut writer = BufWriter::with_capacity(64 * 1024, file);
         writer.write_all(&header.to_bytes())?;
         Ok(Self {
             inner: writer,

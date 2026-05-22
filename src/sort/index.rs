@@ -96,7 +96,7 @@ impl IndexStore {
     pub fn disk(sidecar_path: &Path) -> Result<Self, SortError> {
         let file = File::create(sidecar_path)?;
         Ok(IndexStore::Disk {
-            writer: BufWriter::new(file),
+            writer: BufWriter::with_capacity(64 * 1024, file),
             path: sidecar_path.to_owned(),
             count: 0,
         })
