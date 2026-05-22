@@ -461,6 +461,53 @@ impl<R: Read> Iterator for PcapNGWithPayloadIter<R> {
     }
 }
 
+/// Count packets per flow ID in a single streaming pass over `path`.
+///
+/// Applies `filter` and `bpf` to each packet (caller must clear
+/// `filter.flow_ids` to avoid circular exclusion). Non-IP packets
+/// (no flow key) are not counted.
+///
+/// Returns a map from flow ID → packet count.
+///
+/// # Errors
+/// Returns [`ToolkitPcapError`] on I/O or parse failure.
+pub fn count_flows_in_file(
+    path: &Path,
+    filter: &crate::filter::Filter,
+    bpf: Option<&crate::bpf::BpfExpr>,
+    unidirectional: bool,
+) -> Result<std::collections::HashMap<u64, u64>, ToolkitPcapError> {
+    use crate::filter::PacketMeta;
+    use std::collections::HashMap;
+
+    let mut counts: HashMap<u64, u64> = HashMap::new();
+    let has_filter = !filter.is_empty() || bpf.is_some();
+
+    for item in open_with_payload(path)? {
+        let packet = item?;
+        let meta = PacketMeta::from_packet(
+            packet.info.timestamp_ns,
+            packet.info.captured_len,
+            &packet.data,
+        );
+
+        if has_filter {
+            let ok =
+                (filter.is_empty() || filter.matches(&meta)) && bpf.is_none_or(|b| b.eval(&meta));
+            if !ok {
+                continue;
+            }
+        }
+
+        if let Some(ref key) = meta.flow_key {
+            let id = key.flow_id(unidirectional);
+            *counts.entry(id).or_default() += 1;
+        }
+    }
+
+    Ok(counts)
+}
+
 /// Attempt to extract the 5-tuple from an Ethernet frame's payload.
 ///
 /// Returns `None` for non-IP or unsupported protocols.

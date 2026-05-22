@@ -7,6 +7,7 @@ use pcap_toolkit::bpf;
 use pcap_toolkit::export::{ExportFormat, ExportOptions, export_file};
 use pcap_toolkit::filter::{Filter, FilterRule, IpNet, Op, PortRange};
 use pcap_toolkit::flow::FlowKey;
+use pcap_toolkit::pcap::count_flows_in_file;
 use pcap_toolkit::sort::{SortOptions, parse_slice, sort_file, sort_files};
 use pcap_toolkit::transform::{TransformOptions, parse_ip_mapping};
 
@@ -1160,6 +1161,125 @@ fn test_export_json_empty_pcap_produces_empty_file() {
     assert!(output.exists());
     let content = std::fs::read_to_string(&output).unwrap();
     assert!(content.is_empty());
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+// ── Flow count threshold filter tests ────────────────────────────────────────
+
+/// `count_flows_in_file` returns the correct packet count per flow.
+#[test]
+fn test_count_flows_returns_counts_per_flow() {
+    // Flow A: 10.0.0.1:1000 → 10.0.0.2:80 (UDP, 3 packets)
+    // Flow B: 10.0.0.3:2000 → 10.0.0.4:443 (UDP, 1 packet)
+    let fa = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 1000, 80, &[]);
+    let fb = eth_ipv4_udp([10, 0, 0, 3], [10, 0, 0, 4], 2000, 443, &[]);
+    let pcap_data = build_pcap(&[
+        (1, 0, fa.clone()),
+        (2, 0, fa.clone()),
+        (3, 0, fa.clone()),
+        (4, 0, fb.clone()),
+    ]);
+    let input = write_tmp_pcap("count_flows_basic.pcap", &pcap_data);
+
+    let counts = count_flows_in_file(&input, &Filter::default(), None, false).unwrap();
+    // Two distinct 5-tuples → two distinct bidirectional flow IDs.
+    assert_eq!(counts.len(), 2);
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, 4);
+
+    let _ = std::fs::remove_file(&input);
+}
+
+/// `count_flows_in_file` correctly counts per flow (each unidirectional flow separate).
+#[test]
+fn test_count_flows_basic() {
+    // Flow A: 3 packets; Flow B: 1 packet. Unidirectional → 2 distinct flow IDs.
+    let fa = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 1000, 80, &[]);
+    let fb = eth_ipv4_udp([10, 0, 0, 3], [10, 0, 0, 4], 2000, 443, &[]);
+    let pcap_data = build_pcap(&[
+        (1, 0, fa.clone()),
+        (2, 0, fa.clone()),
+        (3, 0, fa.clone()),
+        (4, 0, fb.clone()),
+    ]);
+    let input = write_tmp_pcap("count_flows_unidirectional.pcap", &pcap_data);
+
+    let counts = count_flows_in_file(&input, &Filter::default(), None, true).unwrap();
+    assert_eq!(counts.len(), 2);
+    let max_count = *counts.values().max().unwrap();
+    let min_count = *counts.values().min().unwrap();
+    assert_eq!(max_count, 3);
+    assert_eq!(min_count, 1);
+
+    let _ = std::fs::remove_file(&input);
+}
+
+/// `count_flows_in_file` applies the structured filter before counting.
+#[test]
+fn test_count_flows_respects_filter() {
+    // Two flows: TCP and UDP. Filter to TCP only → only 1 flow counted.
+    let tcp_pkt = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 80, 0x02, &[]);
+    let udp_pkt = eth_ipv4_udp([10, 0, 0, 3], [10, 0, 0, 4], 5001, 53, &[]);
+    let pcap_data = build_pcap(&[
+        (1, 0, tcp_pkt.clone()),
+        (2, 0, tcp_pkt.clone()),
+        (3, 0, udp_pkt.clone()),
+    ]);
+    let input = write_tmp_pcap("count_flows_filter.pcap", &pcap_data);
+
+    let mut filter = Filter::default();
+    filter.protocols = vec![6]; // TCP only
+    let counts = count_flows_in_file(&input, &filter, None, true).unwrap();
+    // Only the TCP flow should be counted.
+    assert_eq!(counts.len(), 1);
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, 2);
+
+    let _ = std::fs::remove_file(&input);
+}
+
+/// Sort with `min_flow_packets` excludes single-packet flows.
+#[test]
+fn test_sort_min_flow_packets_excludes_low_count_flows() {
+    // Flow A: 3 packets (should survive threshold ≥ 2).
+    // Flow B: 1 packet (should be dropped).
+    let fa = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 1000, 80, &[0u8; 10]);
+    let fb = eth_ipv4_udp([10, 0, 0, 3], [10, 0, 0, 4], 2000, 443, &[0u8; 10]);
+    let pcap_data = build_pcap(&[
+        (1, 0, fa.clone()),
+        (2, 0, fa.clone()),
+        (3, 0, fa.clone()),
+        (4, 0, fb.clone()),
+    ]);
+    let input = write_tmp_pcap("min_flow_sort_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("min_flow_sort_out.pcap");
+
+    // Pre-scan to resolve qualifying flow IDs (threshold = 2).
+    let filter = Filter::default();
+    let counts = count_flows_in_file(&input, &filter, None, true).unwrap();
+    let qualifying: Vec<u64> = counts
+        .into_iter()
+        .filter(|(_, c)| *c >= 2)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(qualifying.len(), 1, "only flow A should qualify");
+
+    let mut effective_filter = filter;
+    effective_filter.flow_ids = qualifying;
+    effective_filter.unidirectional = true;
+
+    let opts = SortOptions {
+        output: output.clone(),
+        filter: effective_filter,
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 3,
+        "only the 3 packets of flow A written"
+    );
 
     let _ = std::fs::remove_file(&input);
     let _ = std::fs::remove_file(&output);

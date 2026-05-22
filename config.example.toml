@@ -73,6 +73,11 @@ unidirectional = false
 # Invert the entire filter result: keep packets that do NOT match.
 negate = false
 
+# Flow count threshold: only include flows with at least this many packets.
+# Requires a pre-scan pass over all inputs; non-IP packets are excluded.
+# Useful for suppressing single-packet noise and ephemeral connections.
+# min_flow_packets = 5
+
 # ── Filter rules (advanced logical composition) ───────────────────────────────
 # Chain additional rules after the base [filter] block.
 # op = "and" (default) — result AND rule

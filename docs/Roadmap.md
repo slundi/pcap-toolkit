@@ -180,7 +180,7 @@ Items not yet scoped — open for discussion before implementation.
 - [x] **Per-protocol truncation rules in TOML**: e.g. keep 128 bytes for TCP/HTTP but only 64 bytes for UDP/DNS, letting users tune storage vs. fidelity per traffic type.
 - [ ] **PCAPng support**: extended block types (EPB, ISB, NRB) for richer metadata and multi-interface captures.
 - [ ] **Streaming input**: read from a live capture interface (`libpcap`) or a named pipe in addition to files, enabling use as a processing stage in a pipeline.
-- [ ] **Flow count threshold filter**: only include flows with ≥ N packets, filtering out noise and single-packet anomalies.
+- [x] **Flow count threshold filter**: only include flows with ≥ N packets, filtering out noise and single-packet anomalies.
 - [ ] **Payload content filter**: byte pattern or regex match inside the packet payload. Powerful for finding specific application-layer markers but costly — evaluate impact before implementing.
 - [ ] **zstd compression on RAW data**: (examples: Apache Parquet + Zstd (standard), Apache Avro + Zstd (The Streaming Choice))
 

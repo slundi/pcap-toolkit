@@ -141,6 +141,15 @@ fn cmd_sort(args: &cli::SortArgs, config: &Config) -> Result<()> {
 
     let transform = build_transform(args, &config.transform)?;
 
+    // CLI --min-flow-packets takes precedence over TOML config value.
+    let min_flow_packets = args.min_flow_packets.or(config.filter.min_flow_packets);
+    let input_paths: Vec<&std::path::Path> = args.inputs.iter().map(|p| p.as_path()).collect();
+    let filter = if let Some(min_pkts) = min_flow_packets {
+        resolve_min_flow_filter(&input_paths, &filter, bpf_filter.as_ref(), min_pkts)?
+    } else {
+        filter
+    };
+
     let opts = SortOptions {
         output: args.output.clone(),
         slice_secs,
@@ -149,8 +158,6 @@ fn cmd_sort(args: &cli::SortArgs, config: &Config) -> Result<()> {
         bpf_filter,
         transform,
     };
-
-    let input_paths: Vec<&std::path::Path> = args.inputs.iter().map(|p| p.as_path()).collect();
 
     let report =
         sort::sort_files(&input_paths, &opts).with_context(|| "failed to sort input file(s)")?;
@@ -311,6 +318,17 @@ fn cmd_export(args: &crate::cli::export::ExportArgs, config: &Config) -> Result<
             bpf::parse(expr).with_context(|| format!("invalid --filter expression '{expr}'"))
         })
         .transpose()?;
+
+    let filter = if let Some(min_pkts) = args.min_flow_packets {
+        resolve_min_flow_filter(
+            &[args.input.as_path()],
+            &filter,
+            bpf_filter.as_ref(),
+            min_pkts,
+        )?
+    } else {
+        filter
+    };
 
     // Resolve output targets: CLI flags take precedence over TOML config.
     let targets: Vec<OutputTarget> = if !args.outputs.is_empty() {
@@ -489,6 +507,17 @@ fn cmd_replay(args: &crate::cli::replay::ReplayArgs) -> Result<()> {
         })
         .transpose()?;
 
+    let filter = if let Some(min_pkts) = args.min_flow_packets {
+        resolve_min_flow_filter(
+            &[args.input.as_path()],
+            &filter,
+            bpf_filter.as_ref(),
+            min_pkts,
+        )?
+    } else {
+        filter
+    };
+
     let opts = ReplayOptions {
         interfaces: args.interfaces.clone(),
         speed,
@@ -574,6 +603,53 @@ fn build_replay_filter(args: &crate::cli::replay::ReplayArgs) -> Result<Filter> 
     f.max_len = args.max_len;
 
     Ok(f)
+}
+
+/// Pre-scan `inputs` to count packets per flow, then restrict `filter` to only
+/// flows that have at least `min_packets` packets.
+///
+/// The `flow_ids` field of `filter` is intentionally ignored during counting
+/// (we are computing which flow IDs qualify). After counting, any existing
+/// explicit `flow_ids` are intersected with the qualifying set.
+///
+/// Non-IP packets are never counted and will not survive the threshold.
+fn resolve_min_flow_filter(
+    inputs: &[&std::path::Path],
+    filter: &Filter,
+    bpf_filter: Option<&bpf::BpfExpr>,
+    min_packets: u64,
+) -> Result<Filter> {
+    use std::collections::{HashMap, HashSet};
+
+    // Use a pre-filter that has flow_ids cleared so we count all flows,
+    // not just the ones the user has explicitly whitelisted.
+    let mut pre_filter = filter.clone();
+    pre_filter.flow_ids.clear();
+
+    // Count packets per flow across all inputs.
+    let mut merged: HashMap<u64, u64> = HashMap::new();
+    for path in inputs {
+        let counts =
+            pcap::count_flows_in_file(path, &pre_filter, bpf_filter, filter.unidirectional)
+                .with_context(|| format!("flow pre-scan failed for {}", path.display()))?;
+        for (id, count) in counts {
+            *merged.entry(id).or_default() += count;
+        }
+    }
+
+    let qualifying: HashSet<u64> = merged
+        .into_iter()
+        .filter(|(_, c)| *c >= min_packets)
+        .map(|(id, _)| id)
+        .collect();
+
+    let mut effective = filter.clone();
+    if effective.flow_ids.is_empty() {
+        effective.flow_ids = qualifying.into_iter().collect();
+    } else {
+        effective.flow_ids.retain(|id| qualifying.contains(id));
+    }
+    Ok(effective)
 }
 
 fn format_duration(d: chrono::Duration) -> String {

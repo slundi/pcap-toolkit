@@ -48,6 +48,8 @@ pub struct ReplayArgs {
     pub negate: bool,
     /// tcpdump/libpcap-style BPF expression.
     pub filter_expr: Option<String>,
+    /// Only include flows with at least this many packets.
+    pub min_flow_packets: Option<u64>,
 }
 
 pub fn replay_cmd() -> impl Parser<Command> {
@@ -133,6 +135,10 @@ pub fn replay_cmd() -> impl Parser<Command> {
         .help("tcpdump/libpcap BPF expression, e.g. \"tcp and dst port 443\"")
         .argument::<String>("EXPR")
         .optional();
+    let min_flow_packets = long("min-flow-packets")
+        .help("Only include flows with at least N packets (pre-scan pass; non-IP packets excluded)")
+        .argument::<u64>("N")
+        .optional();
 
     construct!(ReplayArgs {
         interfaces,
@@ -154,6 +160,7 @@ pub fn replay_cmd() -> impl Parser<Command> {
         unidirectional,
         negate,
         filter_expr,
+        min_flow_packets,
         input,
     })
     .to_options()

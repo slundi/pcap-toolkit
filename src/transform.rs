@@ -273,11 +273,12 @@ fn apply_ip_map(data: &mut Vec<u8>, mappings: &[IpMapping]) -> (bool, bool) {
                 *data = new_data;
                 return (true, true);
             }
-        } else if et == ET_IPV6 && needs_v6_to_v4_reframe(data, ip_off, mappings) {
-            if let Some(new_data) = reframe_ipv6_to_ipv4(data, ip_off, mappings) {
-                *data = new_data;
-                return (true, true);
-            }
+        } else if et == ET_IPV6
+            && needs_v6_to_v4_reframe(data, ip_off, mappings)
+            && let Some(new_data) = reframe_ipv6_to_ipv4(data, ip_off, mappings)
+        {
+            *data = new_data;
+            return (true, true);
         }
     }
 

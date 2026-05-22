@@ -101,6 +101,10 @@ pub struct FilterConfig {
 
     /// Use unidirectional flow IDs (default: bidirectional).
     pub unidirectional: bool,
+
+    /// Only include flows with at least this many packets.
+    /// Non-IP packets are excluded when this filter is active.
+    pub min_flow_packets: Option<u64>,
 }
 
 /// A single rule entry within `[[filter.rules]]` in the TOML config.
@@ -289,6 +293,7 @@ impl<'de> Deserialize<'de> for FilterConfig {
         let min_len = th.optional::<u32>("min_len");
         let max_len = th.optional::<u32>("max_len");
         let unidirectional = th.optional::<bool>("unidirectional").unwrap_or(false);
+        let min_flow_packets = th.optional::<u64>("min_flow_packets");
         th.finalize(None)?;
         Ok(FilterConfig {
             negate,
@@ -307,6 +312,7 @@ impl<'de> Deserialize<'de> for FilterConfig {
             min_len,
             max_len,
             unidirectional,
+            min_flow_packets,
         })
     }
 }
