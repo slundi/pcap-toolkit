@@ -138,12 +138,40 @@ compress_payload = true
 # ── Export ────────────────────────────────────────────────────────────────────
 # Structured data export (JSON Lines, Parquet, or Avro).
 # Used by the `export` subcommand.
-
+#
+# Fan-out: list multiple [[export.outputs]] to write all formats in a single
+# streaming pass — no extra reads, O(buffer) memory regardless of capture size.
+# CLI equivalent:
+#   pcap-toolkit export capture.pcap \
+#     --output out/traffic.jsonl  \
+#     --output out/traffic.parquet \
+#     --output out/traffic.avro
+#
+# Global export options. [export] must appear before [[export.outputs]] in TOML.
 [export]
+unidirectional = false         # true → A→B and B→A get different flow IDs
+
+# Legacy single-output form (superseded by [[export.outputs]] when present).
+# path             = "out/traffic.jsonl"
+# format           = "json"    # override format inferred from extension
+# compress_payload = false
+
+# Fan-out outputs — each entry is written simultaneously in a single pass.
+# Format is inferred from the file extension: .jsonl/.json/.ndjson → JSON,
+# .parquet → Parquet, .avro → Avro. Override with `format = "json"` etc.
+
+[[export.outputs]]
 path             = "out/traffic.jsonl"
-# format         = "json"      # override format inferred from extension
+# format         = "json"      # explicit override (optional)
 compress_payload = false
-unidirectional   = false
+
+[[export.outputs]]
+path             = "out/traffic.parquet"
+compress_payload = true        # ZSTD column compression
+
+[[export.outputs]]
+path             = "out/traffic.avro"
+compress_payload = false
 
 # ── Replay ────────────────────────────────────────────────────────────────────
 # Live packet replay onto one or more network interfaces (Linux only, requires CAP_NET_RAW).

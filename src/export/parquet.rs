@@ -103,8 +103,8 @@ impl ParquetSink {
 }
 
 impl PacketSink for ParquetSink {
-    fn write(&mut self, record: PacketRecord) -> Result<(), ExportError> {
-        self.buffer.push(record);
+    fn write(&mut self, record: &PacketRecord) -> Result<(), ExportError> {
+        self.buffer.push(record.clone());
         self.count += 1;
         if self.buffer.len() >= BATCH_SIZE {
             let batch = std::mem::take(&mut self.buffer);

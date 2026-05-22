@@ -35,7 +35,7 @@ use crate::pcap;
 /// internal buffer and returns the total packet count.
 pub trait PacketSink {
     /// Write a single packet record to the output.
-    fn write(&mut self, record: PacketRecord) -> Result<(), ExportError>;
+    fn write(&mut self, record: &PacketRecord) -> Result<(), ExportError>;
 
     /// Flush all buffered data and finalise the output file.
     ///
@@ -81,7 +81,38 @@ impl ExportFormat {
     }
 }
 
-/// Options for [`export_file`].
+/// A single output target for fan-out export.
+#[derive(Debug)]
+pub struct OutputTarget {
+    /// Destination file path.
+    pub path: std::path::PathBuf,
+    /// Output format. When `None`, inferred from the file extension.
+    pub format: Option<ExportFormat>,
+    /// Apply Zstd compression to payload bytes.
+    pub compress_payload: bool,
+}
+
+/// Options for [`export_multi`] (fan-out to multiple simultaneous outputs).
+#[derive(Debug)]
+pub struct MultiExportOptions {
+    /// One or more output targets written in a single streaming pass.
+    pub targets: Vec<OutputTarget>,
+    /// Structured packet filter applied to each packet.
+    pub filter: Filter,
+    /// BPF expression filter AND-ed with `filter`.
+    pub bpf_filter: Option<BpfExpr>,
+    /// Compute flow IDs unidirectionally (default: bidirectional).
+    pub unidirectional: bool,
+}
+
+/// Summary returned by [`export_multi`] on success.
+#[derive(Debug)]
+pub struct MultiExportReport {
+    /// Per-target reports, in the same order as [`MultiExportOptions::targets`].
+    pub outputs: Vec<ExportReport>,
+}
+
+/// Options for [`export_file`] (single-output convenience wrapper).
 #[derive(Debug, Default)]
 pub struct ExportOptions {
     /// Destination file path (extension used for format auto-detection).
@@ -109,7 +140,7 @@ pub struct ExportReport {
 }
 
 /// A single packet record ready for serialisation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PacketRecord {
     /// Timestamp in nanoseconds since the Unix epoch.
     pub timestamp_ns: u64,
@@ -135,42 +166,44 @@ pub struct PacketRecord {
     pub payload: Vec<u8>,
 }
 
-// ── Public entry point ───────────────────────────────────────────────────────
+// ── Public entry points ──────────────────────────────────────────────────────
 
-/// Export all packets from `input` to the format specified in `opts`.
+/// Export packets from `input` to one or more simultaneous outputs in a single
+/// streaming pass.
 ///
-/// Uses a bounded channel to decouple the PCAP reader (producer thread) from
-/// the format serialiser (main thread), allowing both to run concurrently.
+/// A bounded channel decouples the PCAP producer thread from the consumer
+/// thread that fans each record out to all sinks.  Memory usage is
+/// O(channel capacity + per-sink buffer) regardless of capture size.
 ///
 /// # Errors
 /// Returns [`ExportError`] on I/O failure, format detection failure, or
-/// serialisation error.
-pub fn export_file(input: &Path, opts: &ExportOptions) -> Result<ExportReport, ExportError> {
-    let format = opts
-        .format
-        .or_else(|| ExportFormat::from_extension(&opts.output))
-        .ok_or_else(|| {
-            ExportError::UnknownFormat(
-                opts.output
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("<none>")
-                    .to_owned(),
-            )
-        })?;
+/// serialisation error.  If any sink fails mid-stream the producer is signalled
+/// to stop and the first error is returned.
+pub fn export_multi(
+    input: &Path,
+    opts: &MultiExportOptions,
+) -> Result<MultiExportReport, ExportError> {
+    if opts.targets.is_empty() {
+        return Ok(MultiExportReport {
+            outputs: Vec::new(),
+        });
+    }
 
-    let mut sink: Box<dyn PacketSink> = match format {
-        ExportFormat::Json => {
-            Box::new(json::JsonSink::create(&opts.output, opts.compress_payload)?)
-        }
-        ExportFormat::Parquet => Box::new(parquet::ParquetSink::create(
-            &opts.output,
-            opts.compress_payload,
-        )?),
-        ExportFormat::Avro => {
-            Box::new(avro::AvroSink::create(&opts.output, opts.compress_payload)?)
-        }
-    };
+    // Build and validate all sinks up front so we fail fast on bad paths/formats.
+    struct SinkState {
+        sink: Box<dyn PacketSink>,
+        path: std::path::PathBuf,
+    }
+    let mut sinks: Vec<SinkState> = opts
+        .targets
+        .iter()
+        .map(|t| {
+            Ok(SinkState {
+                sink: build_sink(t)?,
+                path: t.path.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, ExportError>>()?;
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<PacketRecord>(CHANNEL_CAPACITY);
 
@@ -207,18 +240,97 @@ pub fn export_file(input: &Path, opts: &ExportOptions) -> Result<ExportReport, E
         Ok(())
     });
 
-    // Consumer: receive records and write to sink.
+    // Consumer: fan each record out to all sinks.
     for record in rx {
-        sink.write(record)?;
+        for state in &mut sinks {
+            state.sink.write(&record)?;
+        }
     }
-    let packets_written = sink.close()?;
 
     producer.join().map_err(|_| ExportError::ThreadPanic)??;
 
-    Ok(ExportReport {
-        packets_written,
-        output_path: opts.output.clone(),
-    })
+    // Close all sinks and collect per-output reports.
+    let outputs = sinks
+        .into_iter()
+        .map(|mut state| {
+            let packets_written = state.sink.close()?;
+            Ok(ExportReport {
+                packets_written,
+                output_path: state.path,
+            })
+        })
+        .collect::<Result<Vec<_>, ExportError>>()?;
+
+    Ok(MultiExportReport { outputs })
+}
+
+/// Export all packets from `input` to a single output (convenience wrapper
+/// around [`export_multi`] for backward compatibility).
+///
+/// # Errors
+/// Returns [`ExportError`] on I/O failure, format detection failure, or
+/// serialisation error.
+pub fn export_file(input: &Path, opts: &ExportOptions) -> Result<ExportReport, ExportError> {
+    // Resolve format up front so we can return a descriptive error before
+    // touching the file system.
+    let format = opts
+        .format
+        .or_else(|| ExportFormat::from_extension(&opts.output))
+        .ok_or_else(|| {
+            ExportError::UnknownFormat(
+                opts.output
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("<none>")
+                    .to_owned(),
+            )
+        })?;
+
+    let multi_opts = MultiExportOptions {
+        targets: vec![OutputTarget {
+            path: opts.output.clone(),
+            format: Some(format),
+            compress_payload: opts.compress_payload,
+        }],
+        filter: opts.filter.clone(),
+        bpf_filter: opts.bpf_filter.clone(),
+        unidirectional: opts.unidirectional,
+    };
+    let mut report = export_multi(input, &multi_opts)?;
+    Ok(report.outputs.remove(0))
+}
+
+// ── Sink construction ────────────────────────────────────────────────────────
+
+fn build_sink(target: &OutputTarget) -> Result<Box<dyn PacketSink>, ExportError> {
+    let format = target
+        .format
+        .or_else(|| ExportFormat::from_extension(&target.path))
+        .ok_or_else(|| {
+            ExportError::UnknownFormat(
+                target
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("<none>")
+                    .to_owned(),
+            )
+        })?;
+    let sink: Box<dyn PacketSink> = match format {
+        ExportFormat::Json => Box::new(json::JsonSink::create(
+            &target.path,
+            target.compress_payload,
+        )?),
+        ExportFormat::Parquet => Box::new(parquet::ParquetSink::create(
+            &target.path,
+            target.compress_payload,
+        )?),
+        ExportFormat::Avro => Box::new(avro::AvroSink::create(
+            &target.path,
+            target.compress_payload,
+        )?),
+    };
+    Ok(sink)
 }
 
 // ── Record construction ───────────────────────────────────────────────────────

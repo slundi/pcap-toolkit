@@ -74,7 +74,7 @@ impl JsonSink {
 }
 
 impl PacketSink for JsonSink {
-    fn write(&mut self, record: PacketRecord) -> Result<(), ExportError> {
+    fn write(&mut self, record: &PacketRecord) -> Result<(), ExportError> {
         let src_ip_str = record.src_ip.map(|ip| ip.to_string());
         let dst_ip_str = record.dst_ip.map(|ip| ip.to_string());
 

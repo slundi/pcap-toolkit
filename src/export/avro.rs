@@ -102,7 +102,7 @@ impl AvroSink {
 }
 
 impl PacketSink for AvroSink {
-    fn write(&mut self, record: PacketRecord) -> Result<(), ExportError> {
+    fn write(&mut self, record: &PacketRecord) -> Result<(), ExportError> {
         let avro_rec = AvroPacket {
             timestamp_ns: record.timestamp_ns as i64,
             src_ip: record.src_ip.map(|ip| ip.to_string()),
@@ -117,7 +117,7 @@ impl PacketSink for AvroSink {
             payload: if record.payload.is_empty() {
                 None
             } else {
-                Some(serde_bytes::ByteBuf::from(record.payload))
+                Some(serde_bytes::ByteBuf::from(record.payload.clone()))
             },
         };
         self.writer

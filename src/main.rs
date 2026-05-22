@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use pcap_toolkit::{
     bpf,
     config::{Config, TransformConfig},
-    export::{self, ExportFormat, ExportOptions},
+    export::{self, ExportFormat, MultiExportOptions, OutputTarget},
     filter::{
         Filter, IpNet, PortRange, TcpFlagsFilter, parse_datetime_ns, parse_flow_ids,
         parse_proto_list,
@@ -32,7 +32,7 @@ fn main() -> Result<()> {
         cli::Command::Info(a) => cmd_info(&a),
         cli::Command::Stats(a) => cmd_stats(&a),
         cli::Command::Sort(a) => cmd_sort(&a, &config),
-        cli::Command::Export(a) => cmd_export(&a),
+        cli::Command::Export(a) => cmd_export(&a, &config),
         cli::Command::Replay(a) => cmd_replay(&a),
     }
 }
@@ -292,30 +292,8 @@ fn build_transform(args: &cli::SortArgs, cfg: &TransformConfig) -> Result<Transf
     Ok(t)
 }
 
-fn cmd_export(args: &crate::cli::export::ExportArgs) -> Result<()> {
-    let filter = build_export_filter(args)?;
-
-    let bpf_filter = args
-        .filter_expr
-        .as_deref()
-        .map(|expr| {
-            bpf::parse(expr).with_context(|| format!("invalid --filter expression '{expr}'"))
-        })
-        .transpose()?;
-
-    let format = args
-        .format
-        .as_deref()
-        .and_then(ExportFormat::parse)
-        .or_else(|| ExportFormat::from_extension(&args.output));
-
-    if format.is_none() && args.format.is_none() {
-        anyhow::bail!(
-            "cannot infer export format from output path '{}'; \
-             use --format json|parquet|avro or choose an extension .jsonl/.parquet/.avro",
-            args.output.display()
-        );
-    }
+fn cmd_export(args: &crate::cli::export::ExportArgs, config: &Config) -> Result<()> {
+    // Validate --format if explicitly provided.
     if let Some(s) = &args.format
         && ExportFormat::parse(s).is_none()
     {
@@ -325,23 +303,90 @@ fn cmd_export(args: &crate::cli::export::ExportArgs) -> Result<()> {
         );
     }
 
-    let opts = ExportOptions {
-        output: args.output.clone(),
-        format,
-        compress_payload: args.compress_payload,
-        filter,
-        bpf_filter,
-        unidirectional: args.unidirectional,
+    let filter = build_export_filter(args)?;
+    let bpf_filter = args
+        .filter_expr
+        .as_deref()
+        .map(|expr| {
+            bpf::parse(expr).with_context(|| format!("invalid --filter expression '{expr}'"))
+        })
+        .transpose()?;
+
+    // Resolve output targets: CLI flags take precedence over TOML config.
+    let targets: Vec<OutputTarget> = if !args.outputs.is_empty() {
+        args.outputs
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                // --format applies to the first output only (backward compat).
+                let format = if i == 0 {
+                    args.format
+                        .as_deref()
+                        .and_then(ExportFormat::parse)
+                        .or_else(|| ExportFormat::from_extension(path))
+                } else {
+                    ExportFormat::from_extension(path)
+                };
+                OutputTarget {
+                    path: path.clone(),
+                    format,
+                    compress_payload: args.compress_payload,
+                }
+            })
+            .collect()
+    } else if !config.export.outputs.is_empty() {
+        // TOML [[export.outputs]] fan-out.
+        config
+            .export
+            .outputs
+            .iter()
+            .map(|o| OutputTarget {
+                path: o.path.clone(),
+                format: o
+                    .format
+                    .as_deref()
+                    .and_then(ExportFormat::parse)
+                    .or_else(|| ExportFormat::from_extension(&o.path)),
+                compress_payload: o.compress_payload,
+            })
+            .collect()
+    } else if let Some(path) = &config.export.path {
+        // TOML legacy [export] single path.
+        vec![OutputTarget {
+            path: path.clone(),
+            format: config
+                .export
+                .format
+                .as_deref()
+                .and_then(ExportFormat::parse)
+                .or_else(|| ExportFormat::from_extension(path)),
+            compress_payload: config.export.compress_payload,
+        }]
+    } else {
+        anyhow::bail!(
+            "no output specified; use --output PATH or configure [[export.outputs]] in TOML"
+        );
     };
 
-    let report = export::export_file(&args.input, &opts)
+    let unidirectional = args.unidirectional || config.export.unidirectional;
+
+    let opts = MultiExportOptions {
+        targets,
+        filter,
+        bpf_filter,
+        unidirectional,
+    };
+
+    let report = export::export_multi(&args.input, &opts)
         .with_context(|| format!("failed to export {}", args.input.display()))?;
 
-    println!(
-        "Exported {} packet(s) to {}",
-        report.packets_written,
-        report.output_path.display()
-    );
+    for out in &report.outputs {
+        println!(
+            "Exported {} packet(s) to {}",
+            out.packets_written,
+            out.output_path.display()
+        );
+    }
     Ok(())
 }
 

@@ -149,10 +149,26 @@ pub struct TransformConfig {
     pub truncate_by_proto: Vec<ProtocolTruncationConfig>,
 }
 
+/// A single output target within `[[export.outputs]]`.
+#[derive(Debug)]
+pub struct ExportOutputConfig {
+    /// Output file path (extension determines format unless `format` is set).
+    pub path: PathBuf,
+
+    /// Override output format: `"json"`, `"parquet"`, or `"avro"`.
+    pub format: Option<String>,
+
+    /// Apply Zstd compression to payload bytes.
+    pub compress_payload: bool,
+}
+
 /// Structured data export configuration (`[export]` table in TOML).
 #[derive(Debug, Default)]
 pub struct ExportConfig {
-    /// Output file path (extension determines format: `.jsonl`, `.parquet`, `.avro`).
+    /// Multiple output targets (fan-out). Takes precedence over `path`.
+    pub outputs: Vec<ExportOutputConfig>,
+
+    /// Legacy single output path (superseded by `[[export.outputs]]`).
     pub path: Option<PathBuf>,
 
     /// Override output format: `"json"`, `"parquet"`, or `"avro"`.
@@ -366,15 +382,34 @@ impl<'de> Deserialize<'de> for TransformConfig {
     }
 }
 
+impl<'de> Deserialize<'de> for ExportOutputConfig {
+    fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
+        let mut th = TableHelper::new(value)?;
+        let path = th.required::<String>("path").map(PathBuf::from)?;
+        let format = th.optional::<String>("format");
+        let compress_payload = th.optional::<bool>("compress_payload").unwrap_or(false);
+        th.finalize(None)?;
+        Ok(ExportOutputConfig {
+            path,
+            format,
+            compress_payload,
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for ExportConfig {
     fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
         let mut th = TableHelper::new(value)?;
+        let outputs = th
+            .optional::<Vec<ExportOutputConfig>>("outputs")
+            .unwrap_or_default();
         let path = th.optional::<String>("path").map(PathBuf::from);
         let format = th.optional::<String>("format");
         let compress_payload = th.optional::<bool>("compress_payload").unwrap_or(false);
         let unidirectional = th.optional::<bool>("unidirectional").unwrap_or(false);
         th.finalize(None)?;
         Ok(ExportConfig {
+            outputs,
             path,
             format,
             compress_payload,

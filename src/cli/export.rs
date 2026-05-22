@@ -8,9 +8,10 @@ use crate::cli::{Command, input_arg};
 pub struct ExportArgs {
     /// Input PCAP / PCAPng file.
     pub input: PathBuf,
-    /// Output file path (extension determines format: .jsonl, .parquet, .avro).
-    pub output: PathBuf,
+    /// Output file path(s). Repeatable for fan-out to multiple formats in one pass.
+    pub outputs: Vec<PathBuf>,
     /// Override output format: `json`, `parquet`, or `avro`.
+    /// Only applies to the first `--output` when multiple are given.
     pub format: Option<String>,
     /// Compress payload bytes with Zstd (JSON: per-field; Parquet/Avro: column/file codec).
     pub compress_payload: bool,
@@ -52,10 +53,11 @@ pub struct ExportArgs {
 
 pub fn export_cmd() -> impl Parser<Command> {
     let input = input_arg();
-    let output = long("output")
+    let outputs = long("output")
         .short('o')
-        .help("Output file path (.jsonl, .parquet, or .avro)")
-        .argument::<PathBuf>("PATH");
+        .help("Output file path (.jsonl, .parquet, or .avro). Repeatable for fan-out to multiple formats.")
+        .argument::<PathBuf>("PATH")
+        .many();
     let format = long("format")
         .short('F')
         .help("Override output format: json, parquet, or avro")
@@ -134,7 +136,7 @@ pub fn export_cmd() -> impl Parser<Command> {
     construct!(ExportArgs {
         compress_payload,
         format,
-        output,
+        outputs,
         proto,
         src_ip,
         dst_ip,
