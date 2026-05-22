@@ -236,7 +236,7 @@ fn sort_cmd() -> impl Parser<Command> {
         .argument::<String>("DATETIME")
         .optional();
     let replace_ip = long("replace-ip")
-        .help("Replace an IP address: OLD_IP=NEW_IP (repeatable, same address family only)")
+        .help("Replace an IP address: OLD_IP=NEW_IP (repeatable; cross-family IPv4↔IPv6 supported)")
         .argument::<String>("MAPPING")
         .many();
 

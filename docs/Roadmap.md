@@ -141,7 +141,7 @@ Packet-level transformations applied during the second pass before writing or re
 - [x] **Timestamp Shifting**: accept a target start datetime (ms epoch) and shift all timestamps by the computed delta so the capture starts at the requested time.
 - [x] **IP Address Mapping**: replace IP addresses in packet headers according to a mapping table (e.g. `--replace-ip 10.0.0.1=192.168.1.1`), configurable in TOML.
   - Same address-family replacements (IPv4→IPv4, IPv6→IPv6) are straightforward.
-  - Cross-family mapping (IPv4↔IPv6) requires re-framing the Ethernet payload and is tracked separately (see Ideas below).
+  - Cross-family mapping (IPv4↔IPv6) is supported: the entire Ethernet payload is re-framed and all checksums recomputed.
 - [x] **Checksum Recalculation**: after any header modification, recompute Layer 3 (IP) and Layer 4 (TCP/UDP) checksums to keep packets valid for network stacks and replay targets.
 
 ## Phase 5: Structured Data Export (SIEM & Data Lakes)
@@ -176,7 +176,7 @@ Send a (possibly filtered, modified, sorted, or time-shifted) capture onto a rea
 
 Items not yet scoped — open for discussion before implementation.
 
-- [ ] **IPv4 ↔ IPv6 cross-family IP mapping**: replacing an IPv4 address with an IPv6 one (or vice versa) changes the Ethernet payload size and requires re-framing the entire packet. Needs a careful design (new `orig_len`, adjusted snap length, possible MTU implications).
+- [x] **IPv4 ↔ IPv6 cross-family IP mapping**: replacing an IPv4 address with an IPv6 one (or vice versa) changes the Ethernet payload size and requires re-framing the entire packet. Unmapped IPv4 addresses are embedded as `::ffff:a.b.c.d`; unmapped IPv6 addresses that are not IPv4-mapped cause the re-frame to be skipped. `orig_len` and `caplen` are updated to reflect the new frame size.
 - [x] **Per-protocol truncation rules in TOML**: e.g. keep 128 bytes for TCP/HTTP but only 64 bytes for UDP/DNS, letting users tune storage vs. fidelity per traffic type.
 - [ ] **PCAPng support**: extended block types (EPB, ISB, NRB) for richer metadata and multi-interface captures.
 - [ ] **Streaming input**: read from a live capture interface (`libpcap`) or a named pipe in addition to files, enabling use as a processing stage in a pipeline.

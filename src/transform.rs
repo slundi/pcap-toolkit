@@ -1,9 +1,10 @@
 //! Phase 4: Packet-level transformations applied during the sort second pass.
 //!
 //! Transformations are applied in this order for each packet:
-//! 1. **IP address mapping** — replace IP addresses in-place.
+//! 1. **IP address mapping** — replace IP addresses in-place or re-frame the
+//!    packet when the mapping is cross-family (IPv4↔IPv6).
 //! 2. **Payload truncation** — shorten the payload and update length fields.
-//! 3. **Checksum recalculation** — recompute IPv4 header and TCP/UDP transport
+//! 3. **Checksum recalculation** — recompute Layer 3 (IP) and Layer 4 (TCP/UDP)
 //!    checksums whenever the above steps modified the packet bytes.
 //!
 //! Timestamp shifting is computed once before the loop and applied per-packet
@@ -12,8 +13,23 @@
 //! Only Ethernet frames (link type 1) carrying IPv4 or IPv6 are supported.
 //! A single 802.1Q VLAN tag is transparently handled. Other link types and
 //! encapsulations are passed through untouched.
+//!
+//! ## Cross-family IP mapping
+//!
+//! When a mapping changes the IP version of an address (e.g. `10.0.0.1=::1`),
+//! the entire Ethernet payload must be re-framed:
+//!
+//! - **IPv4 → IPv6**: The packet gains a 40-byte IPv6 header (vs. the original
+//!   ≥20-byte IPv4 header). Unmapped IPv4 addresses are embedded as
+//!   IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`).
+//! - **IPv6 → IPv4**: The packet shrinks by 20 bytes (IPv6 40 B → IPv4 20 B).
+//!   Unmapped IPv6 addresses must be IPv4-mapped (`::ffff:a.b.c.d`); if they
+//!   are not, the re-frame is skipped and the packet is passed through
+//!   unchanged.
+//!
+//! After re-framing, all checksums are recalculated using the new pseudo-header.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use thiserror::Error;
 
@@ -33,8 +49,6 @@ const PROTO_UDP: u8 = 17;
 pub enum TransformError {
     #[error("invalid IP mapping '{0}': expected OLD_IP=NEW_IP")]
     InvalidMapping(String),
-    #[error("cross-family IP mapping is not supported: '{0}' → '{1}'")]
-    CrossFamily(String, String),
 }
 
 /// One IP address replacement rule.
@@ -96,12 +110,12 @@ impl TransformOptions {
 
 /// Parse `"OLD_IP=NEW_IP"` into an [`IpMapping`].
 ///
-/// Both sides must be valid IP addresses of the **same** address family.
-/// Cross-family mappings (IPv4↔IPv6) are rejected with [`TransformError::CrossFamily`].
+/// Both sides must be valid IP addresses. Cross-family mappings (IPv4↔IPv6)
+/// are supported and will cause the entire Ethernet payload to be re-framed
+/// when applied; see the module-level documentation for details.
 ///
 /// # Errors
 /// [`TransformError::InvalidMapping`] — format wrong or address unparsable.
-/// [`TransformError::CrossFamily`] — address families differ.
 pub fn parse_ip_mapping(s: &str) -> Result<IpMapping, TransformError> {
     let (old_s, new_s) = s
         .split_once('=')
@@ -115,16 +129,6 @@ pub fn parse_ip_mapping(s: &str) -> Result<IpMapping, TransformError> {
         .trim()
         .parse()
         .map_err(|_| TransformError::InvalidMapping(s.to_owned()))?;
-
-    match (&old, &new) {
-        (IpAddr::V4(_), IpAddr::V6(_)) | (IpAddr::V6(_), IpAddr::V4(_)) => {
-            return Err(TransformError::CrossFamily(
-                old.to_string(),
-                new.to_string(),
-            ));
-        }
-        _ => {}
-    }
 
     Ok(IpMapping { old, new })
 }
@@ -150,7 +154,15 @@ pub fn apply(
         timestamp_ns
     };
 
-    let ip_changed = !opts.ip_map.is_empty() && apply_ip_map(data, &opts.ip_map);
+    let (ip_changed, reframed) = if !opts.ip_map.is_empty() {
+        apply_ip_map(data, &opts.ip_map)
+    } else {
+        (false, false)
+    };
+
+    // After a cross-family re-frame the packet length changes, so origlen must
+    // be updated to the new frame size before the truncation step.
+    let origlen = if reframed { data.len() as u32 } else { origlen };
 
     let (new_origlen, truncated) = match effective_truncation_limit(data, opts) {
         Some(max_bytes) => do_truncate(data, max_bytes, origlen),
@@ -238,16 +250,43 @@ fn find_ip(data: &[u8]) -> Option<(usize, u16)> {
 
 /// Replace IP addresses in the packet's IP header.
 ///
-/// Returns `true` if at least one address was replaced.
-fn apply_ip_map(data: &mut [u8], mappings: &[IpMapping]) -> bool {
+/// Returns `(changed, reframed)`:
+/// - `changed` — `true` if at least one address was modified.
+/// - `reframed` — `true` if the packet was re-framed to a different IP version
+///   (origlen must be updated by the caller).
+fn apply_ip_map(data: &mut Vec<u8>, mappings: &[IpMapping]) -> (bool, bool) {
     let Some((ip_off, et)) = find_ip(data) else {
-        return false;
+        return (false, false);
     };
+
+    // Fast path: if no cross-family mappings exist, skip reframe logic.
+    let has_cross = mappings.iter().any(|m| {
+        matches!(
+            (&m.old, &m.new),
+            (IpAddr::V4(_), IpAddr::V6(_)) | (IpAddr::V6(_), IpAddr::V4(_))
+        )
+    });
+
+    if has_cross {
+        if et == ET_IPV4 && needs_v4_to_v6_reframe(data, ip_off, mappings) {
+            if let Some(new_data) = reframe_ipv4_to_ipv6(data, ip_off, mappings) {
+                *data = new_data;
+                return (true, true);
+            }
+        } else if et == ET_IPV6 && needs_v6_to_v4_reframe(data, ip_off, mappings) {
+            if let Some(new_data) = reframe_ipv6_to_ipv4(data, ip_off, mappings) {
+                *data = new_data;
+                return (true, true);
+            }
+        }
+    }
+
+    // Same-family in-place replacements.
     let mut changed = false;
 
     if et == ET_IPV4 {
         if data.len() < ip_off + 20 {
-            return false;
+            return (false, false);
         }
         for m in mappings {
             if let (IpAddr::V4(old_v4), IpAddr::V4(new_v4)) = (&m.old, &m.new) {
@@ -267,7 +306,7 @@ fn apply_ip_map(data: &mut [u8], mappings: &[IpMapping]) -> bool {
         }
     } else if et == ET_IPV6 {
         if data.len() < ip_off + 40 {
-            return false;
+            return (false, false);
         }
         for m in mappings {
             if let (IpAddr::V6(old_v6), IpAddr::V6(new_v6)) = (&m.old, &m.new) {
@@ -287,7 +326,193 @@ fn apply_ip_map(data: &mut [u8], mappings: &[IpMapping]) -> bool {
         }
     }
 
-    changed
+    (changed, false)
+}
+
+// ── Cross-family reframing ────────────────────────────────────────────────────
+
+/// Return `true` if the IPv4 packet's src or dst matches a v4→v6 mapping.
+fn needs_v4_to_v6_reframe(data: &[u8], ip_off: usize, mappings: &[IpMapping]) -> bool {
+    if data.len() < ip_off + 20 {
+        return false;
+    }
+    let src = &data[ip_off + 12..ip_off + 16];
+    let dst = &data[ip_off + 16..ip_off + 20];
+    mappings.iter().any(|m| {
+        if let (IpAddr::V4(old), IpAddr::V6(_)) = (&m.old, &m.new) {
+            let b = old.octets();
+            src == b || dst == b
+        } else {
+            false
+        }
+    })
+}
+
+/// Return `true` if the IPv6 packet's src or dst matches a v6→v4 mapping.
+fn needs_v6_to_v4_reframe(data: &[u8], ip_off: usize, mappings: &[IpMapping]) -> bool {
+    if data.len() < ip_off + 40 {
+        return false;
+    }
+    let src = &data[ip_off + 8..ip_off + 24];
+    let dst = &data[ip_off + 24..ip_off + 40];
+    mappings.iter().any(|m| {
+        if let (IpAddr::V6(old), IpAddr::V4(_)) = (&m.old, &m.new) {
+            let b = old.octets();
+            src == b || dst == b
+        } else {
+            false
+        }
+    })
+}
+
+/// Re-frame an IPv4 Ethernet packet as IPv6.
+///
+/// Applies v4→v6 (and v4→v4) mappings to both addresses. Unmapped IPv4
+/// addresses are embedded as `::ffff:a.b.c.d`.
+///
+/// Returns `None` if the packet is malformed.
+fn reframe_ipv4_to_ipv6(data: &[u8], ip_off: usize, mappings: &[IpMapping]) -> Option<Vec<u8>> {
+    if data.len() < ip_off + 20 {
+        return None;
+    }
+    let ihl = ((data[ip_off] & 0x0F) * 4) as usize;
+    if data.len() < ip_off + ihl {
+        return None;
+    }
+
+    let ttl = data[ip_off + 8];
+    let proto = data[ip_off + 9];
+    let src_v4 = Ipv4Addr::from(<[u8; 4]>::try_from(&data[ip_off + 12..ip_off + 16]).ok()?);
+    let dst_v4 = Ipv4Addr::from(<[u8; 4]>::try_from(&data[ip_off + 16..ip_off + 20]).ok()?);
+
+    let src_v6 = resolve_ipv4_to_ipv6(src_v4, mappings);
+    let dst_v6 = resolve_ipv4_to_ipv6(dst_v4, mappings);
+
+    let transport = &data[ip_off + ihl..];
+    let payload_len = transport.len() as u16;
+
+    let mut out = Vec::with_capacity(ip_off + 40 + transport.len());
+    write_ethernet_preamble(&mut out, data, ip_off, ET_IPV6);
+
+    // IPv6 fixed header (40 bytes).
+    out.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]); // version=6, TC=0, flow=0
+    out.extend_from_slice(&payload_len.to_be_bytes());
+    out.push(proto); // next header
+    out.push(ttl); // hop limit
+    out.extend_from_slice(&src_v6);
+    out.extend_from_slice(&dst_v6);
+
+    // Transport + payload verbatim; checksums recalculated by caller.
+    out.extend_from_slice(transport);
+
+    Some(out)
+}
+
+/// Re-frame an IPv6 Ethernet packet as IPv4.
+///
+/// Applies v6→v4 (and v6→v6) mappings to both addresses. Unmapped IPv6
+/// addresses must be IPv4-mapped (`::ffff:a.b.c.d`); if they are not, the
+/// re-frame is skipped and `None` is returned.
+///
+/// Returns `None` if the packet is malformed or cannot be converted cleanly.
+fn reframe_ipv6_to_ipv4(data: &[u8], ip_off: usize, mappings: &[IpMapping]) -> Option<Vec<u8>> {
+    if data.len() < ip_off + 40 {
+        return None;
+    }
+
+    let hop_limit = data[ip_off + 7]; // → TTL
+    let proto = data[ip_off + 6]; // next header → protocol
+    let src_v6 = Ipv6Addr::from(<[u8; 16]>::try_from(&data[ip_off + 8..ip_off + 24]).ok()?);
+    let dst_v6 = Ipv6Addr::from(<[u8; 16]>::try_from(&data[ip_off + 24..ip_off + 40]).ok()?);
+
+    // Both addresses must resolve to IPv4; otherwise skip.
+    let src_v4 = resolve_ipv6_to_ipv4(src_v6, mappings)?;
+    let dst_v4 = resolve_ipv6_to_ipv4(dst_v6, mappings)?;
+
+    let transport = &data[ip_off + 40..];
+    let ip_total = (20u16).saturating_add(transport.len() as u16);
+
+    let mut out = Vec::with_capacity(ip_off + 20 + transport.len());
+    write_ethernet_preamble(&mut out, data, ip_off, ET_IPV4);
+
+    // IPv4 header (20 bytes, no options).
+    out.push(0x45); // version=4, IHL=5
+    out.push(0x00); // DSCP/ECN
+    out.extend_from_slice(&ip_total.to_be_bytes());
+    out.extend_from_slice(&[0x00, 0x00]); // identification
+    out.extend_from_slice(&[0x40, 0x00]); // DF flag, fragment offset=0
+    out.push(hop_limit); // TTL
+    out.push(proto); // protocol
+    out.extend_from_slice(&[0x00, 0x00]); // checksum — recalculated by caller
+    out.extend_from_slice(&src_v4);
+    out.extend_from_slice(&dst_v4);
+
+    // Transport + payload verbatim; checksums recalculated by caller.
+    out.extend_from_slice(transport);
+
+    Some(out)
+}
+
+/// Write the Ethernet preamble (MACs + EtherType, with optional VLAN tag) into `out`.
+///
+/// `ip_off` is 14 for untagged frames and 18 for 802.1Q-tagged frames.
+fn write_ethernet_preamble(out: &mut Vec<u8>, src: &[u8], ip_off: usize, ethertype: u16) {
+    out.extend_from_slice(&src[0..12]); // dst MAC + src MAC
+    if ip_off == 18 {
+        out.extend_from_slice(&src[12..16]); // 0x8100 + VLAN TCI
+        out.extend_from_slice(&ethertype.to_be_bytes()); // inner EtherType
+    } else {
+        out.extend_from_slice(&ethertype.to_be_bytes());
+    }
+}
+
+/// Resolve an IPv4 address to its IPv6 representation after applying mappings.
+///
+/// Priority:
+/// 1. A matching v4→v6 mapping → use the mapped IPv6 address directly.
+/// 2. A matching v4→v4 mapping → embed the new IPv4 as `::ffff:new_v4`.
+/// 3. No mapping → embed the original as `::ffff:addr`.
+fn resolve_ipv4_to_ipv6(addr: Ipv4Addr, mappings: &[IpMapping]) -> [u8; 16] {
+    for m in mappings {
+        match (&m.old, &m.new) {
+            (IpAddr::V4(old), IpAddr::V6(new)) if *old == addr => return new.octets(),
+            (IpAddr::V4(old), IpAddr::V4(new)) if *old == addr => {
+                return ipv4_mapped_to_ipv6(new.octets());
+            }
+            _ => {}
+        }
+    }
+    ipv4_mapped_to_ipv6(addr.octets())
+}
+
+/// Resolve an IPv6 address to its IPv4 representation after applying mappings.
+///
+/// Priority:
+/// 1. A matching v6→v4 mapping → use the mapped IPv4 address directly.
+/// 2. A matching v6→v6 mapping → try to extract IPv4 from an IPv4-mapped result.
+/// 3. No mapping → try to extract IPv4 from an IPv4-mapped address (`::ffff:…`).
+///
+/// Returns `None` if the address cannot be expressed as IPv4.
+fn resolve_ipv6_to_ipv4(addr: Ipv6Addr, mappings: &[IpMapping]) -> Option<[u8; 4]> {
+    for m in mappings {
+        match (&m.old, &m.new) {
+            (IpAddr::V6(old), IpAddr::V4(new)) if *old == addr => return Some(new.octets()),
+            (IpAddr::V6(old), IpAddr::V6(new)) if *old == addr => {
+                return new.to_ipv4_mapped().map(|v4| v4.octets());
+            }
+            _ => {}
+        }
+    }
+    addr.to_ipv4_mapped().map(|v4| v4.octets())
+}
+
+/// Embed an IPv4 address as an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`).
+fn ipv4_mapped_to_ipv6(v4: [u8; 4]) -> [u8; 16] {
+    let mut v6 = [0u8; 16];
+    v6[10] = 0xFF;
+    v6[11] = 0xFF;
+    v6[12..16].copy_from_slice(&v4);
+    v6
 }
 
 // ── Payload truncation ────────────────────────────────────────────────────────
@@ -578,6 +803,34 @@ mod tests {
         f
     }
 
+    /// Build an Ethernet/IPv6/UDP frame.
+    fn eth_ipv6_udp(
+        src: [u8; 16],
+        dst: [u8; 16],
+        sport: u16,
+        dport: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let udp_len = (8 + payload.len()) as u16;
+        let payload_len = udp_len; // IPv6 payload length = transport + data
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0xFF; 6]); // dst MAC
+        f.extend_from_slice(&[0x00; 6]); // src MAC
+        f.extend_from_slice(&[0x86, 0xDD]); // IPv6
+        f.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]); // version=6, TC=0, flow=0
+        f.extend_from_slice(&payload_len.to_be_bytes());
+        f.push(17); // next header = UDP
+        f.push(64); // hop limit
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&sport.to_be_bytes());
+        f.extend_from_slice(&dport.to_be_bytes());
+        f.extend_from_slice(&udp_len.to_be_bytes());
+        f.extend_from_slice(&[0x00, 0x00]); // UDP checksum
+        f.extend_from_slice(payload);
+        f
+    }
+
     // ── parse_ip_mapping ──────────────────────────────────────────────────────
 
     #[test]
@@ -595,6 +848,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ip_mapping_cross_family_v4_to_v6() {
+        // Cross-family mappings are now supported.
+        let m = parse_ip_mapping("10.0.0.1=::1").unwrap();
+        assert_eq!(m.old, "10.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(m.new, "::1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_parse_ip_mapping_cross_family_v6_to_v4() {
+        let m = parse_ip_mapping("2001:db8::1=192.168.1.1").unwrap();
+        assert_eq!(m.old, "2001:db8::1".parse::<IpAddr>().unwrap());
+        assert_eq!(m.new, "192.168.1.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
     fn test_parse_ip_mapping_no_equals() {
         assert!(parse_ip_mapping("10.0.0.1").is_err());
     }
@@ -602,12 +870,6 @@ mod tests {
     #[test]
     fn test_parse_ip_mapping_invalid_ip() {
         assert!(parse_ip_mapping("notanip=192.168.1.1").is_err());
-    }
-
-    #[test]
-    fn test_parse_ip_mapping_cross_family() {
-        let err = parse_ip_mapping("10.0.0.1=::1").unwrap_err();
-        assert!(matches!(err, TransformError::CrossFamily(_, _)));
     }
 
     // ── internet_checksum ─────────────────────────────────────────────────────
@@ -677,7 +939,7 @@ mod tests {
         assert_eq!(data, original);
     }
 
-    // ── IP mapping ────────────────────────────────────────────────────────────
+    // ── Same-family IP mapping ────────────────────────────────────────────────
 
     #[test]
     fn test_ip_mapping_replaces_src_ip() {
@@ -735,6 +997,219 @@ mod tests {
         };
         apply(&mut data, 0, 0, origlen, &opts);
         assert_eq!(data, original);
+    }
+
+    // ── Cross-family reframe: IPv4 → IPv6 ────────────────────────────────────
+
+    #[test]
+    fn test_cross_family_ipv4_to_ipv6_src_mapped() {
+        // IPv4 packet, src=10.0.0.1, dst=8.8.8.8
+        // Mapping: 10.0.0.1 → 2001:db8::1 (v4→v6)
+        // Expected: IPv6 packet, src=2001:db8::1, dst=::ffff:8.8.8.8
+        let mut data = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0xAB; 4]);
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![parse_ip_mapping("10.0.0.1=2001:db8::1").unwrap()],
+            ..Default::default()
+        };
+        let (_, new_caplen, new_origlen) = apply(&mut data, 0, 0, origlen, &opts);
+
+        // EtherType must be IPv6.
+        assert_eq!(u16::from_be_bytes([data[12], data[13]]), ET_IPV6);
+        // IPv6 header: version nibble.
+        assert_eq!(data[14] >> 4, 6);
+        // src address at offset 22: must be 2001:db8::1
+        let src_v6: Ipv6Addr = Ipv6Addr::from(<[u8; 16]>::try_from(&data[22..38]).unwrap());
+        assert_eq!(src_v6, "2001:db8::1".parse::<Ipv6Addr>().unwrap());
+        // dst address at offset 38: must be ::ffff:8.8.8.8
+        let dst_v6: Ipv6Addr = Ipv6Addr::from(<[u8; 16]>::try_from(&data[38..54]).unwrap());
+        assert_eq!(dst_v6, "::ffff:8.8.8.8".parse::<Ipv6Addr>().unwrap());
+        // Payload is preserved: 4 bytes 0xAB at the end.
+        assert_eq!(&data[data.len() - 4..], &[0xAB; 4]);
+        // Lengths were updated.
+        assert_eq!(new_caplen, data.len() as u32);
+        assert_eq!(new_origlen, data.len() as u32);
+    }
+
+    #[test]
+    fn test_cross_family_ipv4_to_ipv6_dst_mapped() {
+        // IPv4 packet, src=1.2.3.4, dst=10.0.0.2
+        // Mapping: 10.0.0.2 → ::1 (v4→v6)
+        // Expected: IPv6 packet, src=::ffff:1.2.3.4, dst=::1
+        let mut data = eth_ipv4_udp([1, 2, 3, 4], [10, 0, 0, 2], 5000, 80, &[]);
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![parse_ip_mapping("10.0.0.2=::1").unwrap()],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, origlen, &opts);
+
+        assert_eq!(u16::from_be_bytes([data[12], data[13]]), ET_IPV6);
+        let src_v6: Ipv6Addr = Ipv6Addr::from(<[u8; 16]>::try_from(&data[22..38]).unwrap());
+        assert_eq!(src_v6, "::ffff:1.2.3.4".parse::<Ipv6Addr>().unwrap());
+        let dst_v6: Ipv6Addr = Ipv6Addr::from(<[u8; 16]>::try_from(&data[38..54]).unwrap());
+        assert_eq!(dst_v6, "::1".parse::<Ipv6Addr>().unwrap());
+    }
+
+    #[test]
+    fn test_cross_family_ipv4_to_ipv6_both_mapped() {
+        // Both src and dst are mapped to IPv6 addresses.
+        let mut data = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 1000, 2000, &[0xCC; 8]);
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![
+                parse_ip_mapping("10.0.0.1=2001:db8::1").unwrap(),
+                parse_ip_mapping("10.0.0.2=2001:db8::2").unwrap(),
+            ],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, origlen, &opts);
+
+        assert_eq!(u16::from_be_bytes([data[12], data[13]]), ET_IPV6);
+        let src_v6: Ipv6Addr = Ipv6Addr::from(<[u8; 16]>::try_from(&data[22..38]).unwrap());
+        let dst_v6: Ipv6Addr = Ipv6Addr::from(<[u8; 16]>::try_from(&data[38..54]).unwrap());
+        assert_eq!(src_v6, "2001:db8::1".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(dst_v6, "2001:db8::2".parse::<Ipv6Addr>().unwrap());
+    }
+
+    #[test]
+    fn test_cross_family_ipv4_to_ipv6_checksum_valid() {
+        let mut data = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0xDE; 16]);
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![parse_ip_mapping("10.0.0.1=2001:db8::1").unwrap()],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, origlen, &opts);
+
+        // Verify that the UDP checksum in the IPv6 packet is non-zero (was computed).
+        // Transport starts at byte 54 (14 Ethernet + 40 IPv6).
+        let udp_csum = u16::from_be_bytes([data[54 + 6], data[54 + 7]]);
+        assert_ne!(udp_csum, 0, "UDP checksum must be set in IPv6 packet");
+    }
+
+    #[test]
+    fn test_cross_family_ipv4_to_ipv6_size_change() {
+        // IPv4 → IPv6 adds (40 - 20) = 20 bytes to the IP header.
+        let payload = [0u8; 10];
+        let mut data = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1000, 2000, &payload);
+        let ipv4_len = data.len();
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![parse_ip_mapping("10.0.0.1=::1").unwrap()],
+            ..Default::default()
+        };
+        let (_, new_caplen, new_origlen) = apply(&mut data, 0, 0, origlen, &opts);
+
+        // 14 (Eth) + 40 (IPv6) + 8 (UDP) + 10 (payload) = 72
+        // Original: 14 (Eth) + 20 (IPv4) + 8 (UDP) + 10 (payload) = 52
+        assert_eq!(data.len(), ipv4_len + 20);
+        assert_eq!(new_caplen, data.len() as u32);
+        assert_eq!(new_origlen, data.len() as u32);
+    }
+
+    // ── Cross-family reframe: IPv6 → IPv4 ────────────────────────────────────
+
+    #[test]
+    fn test_cross_family_ipv6_to_ipv4_src_mapped() {
+        // IPv6 packet, src=2001:db8::1, dst=::ffff:8.8.8.8
+        // Mapping: 2001:db8::1 → 10.0.0.1 (v6→v4)
+        let src_v6: [u8; 16] = "2001:db8::1".parse::<Ipv6Addr>().unwrap().octets();
+        let dst_v6: [u8; 16] = "::ffff:8.8.8.8".parse::<Ipv6Addr>().unwrap().octets();
+        let mut data = eth_ipv6_udp(src_v6, dst_v6, 5000, 80, &[0xBB; 4]);
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![parse_ip_mapping("2001:db8::1=10.0.0.1").unwrap()],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, origlen, &opts);
+
+        // EtherType must be IPv4.
+        assert_eq!(u16::from_be_bytes([data[12], data[13]]), ET_IPV4);
+        assert_eq!(data[14] >> 4, 4);
+        // src IP at offset 26: 10.0.0.1
+        assert_eq!(&data[26..30], &[10, 0, 0, 1]);
+        // dst IP at offset 30: 8.8.8.8 (extracted from ::ffff:8.8.8.8)
+        assert_eq!(&data[30..34], &[8, 8, 8, 8]);
+        // Payload preserved.
+        assert_eq!(&data[data.len() - 4..], &[0xBB; 4]);
+    }
+
+    #[test]
+    fn test_cross_family_ipv6_to_ipv4_dst_mapped() {
+        // IPv6 packet, src=::ffff:1.2.3.4, dst=2001:db8::2
+        // Mapping: 2001:db8::2 → 192.168.1.2 (v6→v4)
+        let src_v6: [u8; 16] = "::ffff:1.2.3.4".parse::<Ipv6Addr>().unwrap().octets();
+        let dst_v6: [u8; 16] = "2001:db8::2".parse::<Ipv6Addr>().unwrap().octets();
+        let mut data = eth_ipv6_udp(src_v6, dst_v6, 1234, 443, &[]);
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![parse_ip_mapping("2001:db8::2=192.168.1.2").unwrap()],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, origlen, &opts);
+
+        assert_eq!(u16::from_be_bytes([data[12], data[13]]), ET_IPV4);
+        assert_eq!(&data[26..30], &[1, 2, 3, 4]); // extracted from ::ffff:1.2.3.4
+        assert_eq!(&data[30..34], &[192, 168, 1, 2]);
+    }
+
+    #[test]
+    fn test_cross_family_ipv6_to_ipv4_skipped_when_non_mapped_addr() {
+        // IPv6 packet where dst is a native IPv6 addr (not IPv4-mapped) and
+        // not covered by any mapping → reframe must be skipped.
+        let src_v6: [u8; 16] = "2001:db8::1".parse::<Ipv6Addr>().unwrap().octets();
+        let dst_v6: [u8; 16] = "2001:db8::2".parse::<Ipv6Addr>().unwrap().octets();
+        let mut data = eth_ipv6_udp(src_v6, dst_v6, 1000, 2000, &[0xFF; 4]);
+        let original = data.clone();
+        let origlen = data.len() as u32;
+        // Mapping only covers src; dst is a native IPv6 addr with no mapping → skip.
+        let opts = TransformOptions {
+            ip_map: vec![parse_ip_mapping("2001:db8::1=10.0.0.1").unwrap()],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, origlen, &opts);
+        // Packet must be unchanged (reframe was skipped).
+        assert_eq!(data, original);
+    }
+
+    #[test]
+    fn test_cross_family_ipv6_to_ipv4_checksum_valid() {
+        let src_v6: [u8; 16] = "2001:db8::1".parse::<Ipv6Addr>().unwrap().octets();
+        let dst_v6: [u8; 16] = "::ffff:8.8.8.8".parse::<Ipv6Addr>().unwrap().octets();
+        let mut data = eth_ipv6_udp(src_v6, dst_v6, 5000, 53, &[0xDE; 8]);
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![parse_ip_mapping("2001:db8::1=10.0.0.1").unwrap()],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, origlen, &opts);
+
+        assert_eq!(u16::from_be_bytes([data[12], data[13]]), ET_IPV4);
+        let ihl = ((data[14] & 0x0F) * 4) as usize;
+        assert_eq!(
+            internet_checksum(&data[14..14 + ihl]),
+            0x0000,
+            "IPv4 header checksum must be valid after v6→v4 reframe"
+        );
+    }
+
+    #[test]
+    fn test_cross_family_ipv6_to_ipv4_size_change() {
+        // IPv6 → IPv4 removes 20 bytes (40-byte header → 20-byte header).
+        let src_v6: [u8; 16] = "2001:db8::1".parse::<Ipv6Addr>().unwrap().octets();
+        let dst_v6: [u8; 16] = "::ffff:8.8.8.8".parse::<Ipv6Addr>().unwrap().octets();
+        let mut data = eth_ipv6_udp(src_v6, dst_v6, 1000, 2000, &[0u8; 10]);
+        let ipv6_len = data.len();
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![parse_ip_mapping("2001:db8::1=10.0.0.1").unwrap()],
+            ..Default::default()
+        };
+        let (_, new_caplen, new_origlen) = apply(&mut data, 0, 0, origlen, &opts);
+        assert_eq!(data.len(), ipv6_len - 20);
+        assert_eq!(new_caplen, data.len() as u32);
+        assert_eq!(new_origlen, data.len() as u32);
     }
 
     // ── Payload truncation ────────────────────────────────────────────────────
@@ -943,5 +1418,24 @@ mod tests {
         // Header checksum is valid (word sum = 0xFFFF → !0xFFFF = 0x0000).
         let ihl = ((data[14] & 0x0F) * 4) as usize;
         assert_eq!(internet_checksum(&data[14..14 + ihl]), 0x0000);
+    }
+
+    #[test]
+    fn test_cross_family_and_truncation_combined() {
+        // IPv4 → IPv6 reframe, then truncate payload.
+        let payload = vec![0xCD; 100];
+        let mut data = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![parse_ip_mapping("10.0.0.1=2001:db8::1").unwrap()],
+            max_payload_bytes: Some(10),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+
+        // Must be an IPv6 packet.
+        assert_eq!(u16::from_be_bytes([data[12], data[13]]), ET_IPV6);
+        // Ethernet(14) + IPv6(40) + UDP(8) + 10 = 72
+        assert_eq!(data.len(), 72);
     }
 }
