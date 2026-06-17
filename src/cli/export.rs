@@ -103,11 +103,11 @@ pub fn export_cmd() -> impl Parser<Command> {
         .argument::<String>("IDS")
         .optional();
     let from = long("from")
-        .help("Keep packets at or after this datetime (RFC 3339 or ms epoch)")
+        .help("Keep packets at or after this datetime (RFC 3339 or Unix epoch seconds)")
         .argument::<String>("DATETIME")
         .optional();
     let to = long("to")
-        .help("Keep packets at or before this datetime (RFC 3339 or ms epoch)")
+        .help("Keep packets at or before this datetime (RFC 3339 or Unix epoch seconds)")
         .argument::<String>("DATETIME")
         .optional();
     let tcp_flags = long("tcp-flags")

@@ -84,10 +84,10 @@ pub struct FilterConfig {
     /// Hex flow IDs to retain (comma-separated or multiple entries).
     pub flow_id: Vec<String>,
 
-    /// Retain only packets at or after this datetime (RFC 3339 or ms epoch).
+    /// Retain only packets at or after this datetime (RFC 3339 or Unix epoch seconds).
     pub from: Option<String>,
 
-    /// Retain only packets at or before this datetime (RFC 3339 or ms epoch).
+    /// Retain only packets at or before this datetime (RFC 3339 or Unix epoch seconds).
     pub to: Option<String>,
 
     /// TCP flags filter string (e.g. `"SYN+ACK"`, `"RST:exact"`).
@@ -145,7 +145,7 @@ pub struct ProtocolTruncationConfig {
 pub struct TransformConfig {
     /// Global maximum payload bytes (per-protocol rules take precedence when set).
     pub max_payload_bytes: Option<u32>,
-    /// Shift all timestamps so the capture starts at this datetime (RFC 3339 or ms epoch).
+    /// Shift all timestamps so the capture starts at this datetime (RFC 3339 or Unix epoch seconds).
     pub timestamp_start: Option<String>,
     /// IP address replacement rules as `"OLD_IP=NEW_IP"` strings.
     pub replace_ip: Vec<String>,

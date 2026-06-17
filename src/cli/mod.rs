@@ -80,9 +80,9 @@ pub struct SortArgs {
     pub port: Vec<String>,
     /// Comma-separated hex flow IDs to retain (e.g. `deadbeef,0xcafe1234`).
     pub flow_id: Option<String>,
-    /// Retain only packets at or after this datetime (RFC 3339 or ms epoch).
+    /// Retain only packets at or after this datetime (RFC 3339 or Unix epoch seconds).
     pub from: Option<String>,
-    /// Retain only packets at or before this datetime (RFC 3339 or ms epoch).
+    /// Retain only packets at or before this datetime (RFC 3339 or Unix epoch seconds).
     pub to: Option<String>,
     /// TCP flags filter (e.g. `SYN`, `SYN+ACK`, `RST:exact`).
     pub tcp_flags: Option<String>,
@@ -196,11 +196,11 @@ fn sort_cmd() -> impl Parser<Command> {
         .argument::<String>("IDS")
         .optional();
     let from = long("from")
-        .help("Keep packets at or after this datetime (RFC 3339 or ms epoch)")
+        .help("Keep packets at or after this datetime (RFC 3339 or Unix epoch seconds)")
         .argument::<String>("DATETIME")
         .optional();
     let to = long("to")
-        .help("Keep packets at or before this datetime (RFC 3339 or ms epoch)")
+        .help("Keep packets at or before this datetime (RFC 3339 or Unix epoch seconds)")
         .argument::<String>("DATETIME")
         .optional();
     let tcp_flags = long("tcp-flags")
@@ -238,7 +238,7 @@ fn sort_cmd() -> impl Parser<Command> {
         .argument::<u32>("BYTES")
         .optional();
     let timestamp_start = long("timestamp-start")
-        .help("Shift all timestamps so the capture starts at this datetime (RFC 3339 or ms epoch)")
+        .help("Shift all timestamps so the capture starts at this datetime (RFC 3339 or Unix epoch seconds)")
         .argument::<String>("DATETIME")
         .optional();
     let replace_ip = long("replace-ip")

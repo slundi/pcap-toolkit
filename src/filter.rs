@@ -34,7 +34,7 @@ pub enum FilterError {
     #[error("invalid flow ID (expected hex, optionally prefixed with '0x'): '{0}'")]
     InvalidFlowId(String),
 
-    #[error("invalid datetime (expected RFC 3339 or millisecond epoch integer): '{0}'")]
+    #[error("invalid datetime (expected RFC 3339 or Unix epoch integer in seconds): '{0}'")]
     InvalidDateTime(String),
 
     #[error(
@@ -290,16 +290,20 @@ pub fn parse_flow_ids(s: &str) -> Result<Vec<u64>, FilterError> {
         .collect()
 }
 
-/// Parse an RFC 3339 datetime string or a millisecond-epoch integer to
-/// nanoseconds since the Unix epoch.
+/// Parse an RFC 3339 datetime string or a Unix epoch integer (in **seconds**)
+/// to nanoseconds since the Unix epoch.
+///
+/// Bare integers are treated as whole seconds, which is the dominant convention
+/// (`date +%s`, Python `time.time()`, etc.). Sub-second precision requires an
+/// RFC 3339 string with a fractional seconds component.
 ///
 /// # Errors
 /// Returns [`FilterError::InvalidDateTime`] if the string is neither a valid
 /// RFC 3339 string nor a decimal integer.
 pub fn parse_datetime_ns(s: &str) -> Result<u64, FilterError> {
-    // Try ms epoch integer first.
-    if let Ok(ms) = s.parse::<u64>() {
-        return Ok(ms.saturating_mul(1_000_000));
+    // Bare integers are Unix epoch seconds (the dominant convention).
+    if let Ok(secs) = s.parse::<u64>() {
+        return Ok(secs.saturating_mul(1_000_000_000));
     }
     chrono::DateTime::parse_from_rfc3339(s)
         .map_err(|_| FilterError::InvalidDateTime(s.to_owned()))
@@ -919,14 +923,43 @@ mod tests {
     // ── parse_datetime_ns ────────────────────────────────────────────────────
 
     #[test]
-    fn test_parse_datetime_ms_epoch() {
-        assert_eq!(parse_datetime_ns("1000").unwrap(), 1_000_000_000);
+    fn test_parse_datetime_secs_epoch() {
+        // "1" second = 1_000_000_000 ns.
+        assert_eq!(parse_datetime_ns("1").unwrap(), 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_datetime_secs_epoch_common_value() {
+        // A realistic Unix timestamp (2001-09-09 01:46:40 UTC).
+        let secs: u64 = 1_000_000_000;
+        let ns = parse_datetime_ns(&secs.to_string()).unwrap();
+        assert_eq!(ns, secs * 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_datetime_secs_matches_rfc3339() {
+        // "1" second since epoch via integer must equal the RFC 3339 equivalent.
+        let via_int = parse_datetime_ns("1").unwrap();
+        let via_rfc = parse_datetime_ns("1970-01-01T00:00:01Z").unwrap();
+        assert_eq!(via_int, via_rfc);
+    }
+
+    #[test]
+    fn test_parse_datetime_zero() {
+        assert_eq!(parse_datetime_ns("0").unwrap(), 0);
     }
 
     #[test]
     fn test_parse_datetime_rfc3339() {
         let ns = parse_datetime_ns("1970-01-01T00:00:01Z").unwrap();
         assert_eq!(ns, 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_datetime_rfc3339_subsecond() {
+        // Sub-second precision is only available via RFC 3339.
+        let ns = parse_datetime_ns("1970-01-01T00:00:01.5Z").unwrap();
+        assert_eq!(ns, 1_500_000_000);
     }
 
     #[test]
