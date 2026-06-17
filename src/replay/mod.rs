@@ -124,7 +124,9 @@ pub(crate) fn compute_delay(
                 return Duration::ZERO;
             }
             // Packet N should go out at N * (1_000_000_000 / pps) ns after start.
-            let target_ns = sent_count * 1_000_000_000 / pps;
+            // Use u128 to avoid overflow: sent_count * 1e9 wraps u64 after ~18.4 B
+            // packets (~5 h at 1 Mpps). The result fits in u64 for any realistic run.
+            let target_ns = (sent_count as u128 * 1_000_000_000 / *pps as u128) as u64;
             let elapsed_ns = start_time.elapsed().as_nanos() as u64;
             if target_ns > elapsed_ns {
                 Duration::from_nanos(target_ns - elapsed_ns)
@@ -404,6 +406,50 @@ mod tests {
         let mut first_ts = None;
         let start = Instant::now();
         let d = compute_delay(&ReplaySpeed::Pps(0), 0, &mut first_ts, 5, &start);
+        assert_eq!(d, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_compute_delay_pps_spacing() {
+        // At 1 000 pps packet N should be sent 1 ms after packet 0.
+        // We ask for delay just before the start so elapsed ≈ 0, meaning
+        // the returned delay should equal the target offset.
+        let mut first_ts = None;
+        let start = Instant::now();
+        // Packet 1: target = 1 * 1e9 / 1000 = 1_000_000 ns = 1 ms.
+        let d = compute_delay(&ReplaySpeed::Pps(1_000), 0, &mut first_ts, 1, &start);
+        assert!(
+            d >= Duration::from_micros(990) && d <= Duration::from_millis(2),
+            "expected ~1 ms delay, got {d:?}"
+        );
+    }
+
+    #[test]
+    fn test_compute_delay_pps_no_overflow_at_high_count() {
+        // sent_count * 1_000_000_000 would overflow u64 at ~18.4 B.
+        // At 10 Gpps this threshold is crossed after 18 seconds of replay.
+        // Verify the result is still sane (positive, not wrapped).
+        let pps: u64 = 10_000_000_000; // 10 Gpps
+        let sent_count: u64 = 20_000_000_000; // 20 B packets — past the u64 overflow point
+        let mut first_ts = None;
+        let start = Instant::now();
+        let d = compute_delay(&ReplaySpeed::Pps(pps), 0, &mut first_ts, sent_count, &start);
+        // target_ns = 20e9 * 1e9 / 10e9 = 2_000_000_000 ns = 2 s
+        // elapsed is ~0, so delay should be ~2 s and must not be zero (wrap sentinel).
+        assert!(
+            d >= Duration::from_millis(1_990),
+            "delay wrapped or saturated: got {d:?}"
+        );
+    }
+
+    #[test]
+    fn test_compute_delay_pps_past_target_is_zero() {
+        // If we are already past the target time, delay must be zero (no negative sleep).
+        let mut first_ts = None;
+        // Backdate start by 10 s so elapsed >> target.
+        let start = Instant::now() - Duration::from_secs(10);
+        // Packet 1 at 1 000 pps: target = 1 ms, but 10 s have elapsed.
+        let d = compute_delay(&ReplaySpeed::Pps(1_000), 0, &mut first_ts, 1, &start);
         assert_eq!(d, Duration::ZERO);
     }
 
