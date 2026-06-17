@@ -15,6 +15,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use etherparse::{NetSlice, SlicedPacket, TransportSlice};
 use thiserror::Error;
 
+use rustc_hash::FxHashSet;
+
 use crate::flow::{FlowKey, normalize_ip};
 
 // ── Error ────────────────────────────────────────────────────────────────────
@@ -450,7 +452,7 @@ trait FilterBody {
     fn src_ports(&self) -> &[PortRange];
     fn dst_ports(&self) -> &[PortRange];
     fn ports(&self) -> &[PortRange];
-    fn flow_ids(&self) -> &[u64];
+    fn flow_ids(&self) -> &FxHashSet<u64>;
     fn start_ns(&self) -> Option<u64>;
     fn end_ns(&self) -> Option<u64>;
     fn tcp_flags(&self) -> Option<TcpFlagsFilter>;
@@ -484,7 +486,7 @@ macro_rules! impl_filter_body {
             fn ports(&self) -> &[PortRange] {
                 &self.ports
             }
-            fn flow_ids(&self) -> &[u64] {
+            fn flow_ids(&self) -> &FxHashSet<u64> {
                 &self.flow_ids
             }
             fn start_ns(&self) -> Option<u64> {
@@ -670,7 +672,7 @@ pub struct Filter {
     pub ports: Vec<PortRange>,
 
     /// Flow IDs (pre-computed) to retain. Empty = any flow.
-    pub flow_ids: Vec<u64>,
+    pub flow_ids: FxHashSet<u64>,
 
     /// Inclusive lower timestamp bound (nanoseconds). `None` = no lower bound.
     pub from_ns: Option<u64>,
@@ -753,7 +755,7 @@ pub struct FilterRule {
     pub src_ports: Vec<PortRange>,
     pub dst_ports: Vec<PortRange>,
     pub ports: Vec<PortRange>,
-    pub flow_ids: Vec<u64>,
+    pub flow_ids: FxHashSet<u64>,
     pub from_ns: Option<u64>,
     pub to_ns: Option<u64>,
     pub tcp_flags: Option<TcpFlagsFilter>,
@@ -1125,7 +1127,7 @@ mod tests {
         let key = FlowKey::new(v4(10, 0, 0, 1), v4(10, 0, 0, 2), 1234, 443, 6);
         let id = key.flow_id(false);
         let mut f = Filter::default();
-        f.flow_ids = vec![id];
+        f.flow_ids = [id].into_iter().collect();
 
         let matching = PacketMeta {
             timestamp_ns: 0,
@@ -1142,6 +1144,65 @@ mod tests {
             tcp_flags: 0,
         };
         assert!(!f.matches(&other));
+    }
+
+    #[test]
+    fn test_filter_flow_id_multiple() {
+        let keys: Vec<FlowKey> = (0u8..4)
+            .map(|i| {
+                FlowKey::new(
+                    v4(10, 0, 0, i + 1),
+                    v4(10, 0, 0, 100),
+                    1000 + i as u16,
+                    80,
+                    6,
+                )
+            })
+            .collect();
+        let ids: Vec<u64> = keys.iter().map(|k| k.flow_id(false)).collect();
+
+        let mut f = Filter::default();
+        f.flow_ids = ids[..3].iter().copied().collect(); // allow first three
+
+        for (i, key) in keys.iter().enumerate() {
+            let pkt = PacketMeta {
+                timestamp_ns: 0,
+                captured_len: 60,
+                flow_key: Some(key.clone()),
+                tcp_flags: 0,
+            };
+            if i < 3 {
+                assert!(f.matches(&pkt), "flow {i} should be allowed");
+            } else {
+                assert!(!f.matches(&pkt), "flow {i} should be blocked");
+            }
+        }
+    }
+
+    #[test]
+    fn test_filter_flow_id_empty_allows_all() {
+        // An empty flow_ids set must not filter anything.
+        let f = Filter::default();
+        assert!(f.flow_ids.is_empty());
+        let pkt = meta(0, 60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 1234, 80, 6, 0);
+        assert!(f.matches(&pkt));
+    }
+
+    #[test]
+    fn test_filter_flow_id_non_ip_blocked() {
+        // A non-IP packet has no flow key; if flow_ids is non-empty it should
+        // not match (there is no ID to look up).
+        let key = FlowKey::new(v4(10, 0, 0, 1), v4(10, 0, 0, 2), 1234, 443, 6);
+        let mut f = Filter::default();
+        f.flow_ids = [key.flow_id(false)].into_iter().collect();
+
+        let no_key = PacketMeta {
+            timestamp_ns: 0,
+            captured_len: 60,
+            flow_key: None,
+            tcp_flags: 0,
+        };
+        assert!(!f.matches(&no_key));
     }
 
     #[test]

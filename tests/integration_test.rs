@@ -10,6 +10,7 @@ use pcap_toolkit::flow::FlowKey;
 use pcap_toolkit::pcap::count_flows_in_file;
 use pcap_toolkit::sort::{SortOptions, parse_slice, sort_file, sort_files};
 use pcap_toolkit::transform::{TransformOptions, parse_ip_mapping};
+use rustc_hash::FxHashSet;
 
 // ── PCAP builder helpers ─────────────────────────────────────────────────────
 
@@ -417,7 +418,7 @@ fn test_filter_by_flow_id() {
     let output = std::env::temp_dir().join("filter_flowid_out.pcap");
 
     let mut filter = Filter::default();
-    filter.flow_ids = vec![flow_id];
+    filter.flow_ids = [flow_id].into_iter().collect();
 
     let opts = SortOptions {
         output: output.clone(),
@@ -1259,7 +1260,7 @@ fn test_sort_min_flow_packets_excludes_low_count_flows() {
     // Pre-scan to resolve qualifying flow IDs (threshold = 2).
     let filter = Filter::default();
     let counts = count_flows_in_file(&input, &filter, None, true).unwrap();
-    let qualifying: Vec<u64> = counts
+    let qualifying: FxHashSet<u64> = counts
         .into_iter()
         .filter(|(_, c)| *c >= 2)
         .map(|(id, _)| id)

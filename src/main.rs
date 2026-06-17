@@ -17,6 +17,7 @@ use pcap_toolkit::{
     stats::{CaptureInfo, StatsCollector},
     transform::{ProtocolTruncation, TransformOptions, parse_ip_mapping},
 };
+use rustc_hash::FxHashSet;
 
 fn main() -> Result<()> {
     let args = cli::parser().run();
@@ -214,7 +215,9 @@ fn build_filter(args: &cli::SortArgs) -> Result<Filter> {
 
     if let Some(ids_str) = &args.flow_id {
         f.flow_ids = parse_flow_ids(ids_str)
-            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?;
+            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?
+            .into_iter()
+            .collect();
     }
 
     if let Some(from_str) = &args.from {
@@ -449,7 +452,9 @@ fn build_export_filter(args: &crate::cli::export::ExportArgs) -> Result<Filter> 
 
     if let Some(ids_str) = &args.flow_id {
         f.flow_ids = parse_flow_ids(ids_str)
-            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?;
+            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?
+            .into_iter()
+            .collect();
     }
 
     if let Some(from_str) = &args.from {
@@ -577,7 +582,9 @@ fn build_replay_filter(args: &crate::cli::replay::ReplayArgs) -> Result<Filter> 
 
     if let Some(ids_str) = &args.flow_id {
         f.flow_ids = parse_flow_ids(ids_str)
-            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?;
+            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?
+            .into_iter()
+            .collect();
     }
 
     if let Some(from_str) = &args.from {
@@ -619,7 +626,7 @@ fn resolve_min_flow_filter(
     bpf_filter: Option<&bpf::BpfExpr>,
     min_packets: u64,
 ) -> Result<Filter> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     // Use a pre-filter that has flow_ids cleared so we count all flows,
     // not just the ones the user has explicitly whitelisted.
@@ -637,7 +644,7 @@ fn resolve_min_flow_filter(
         }
     }
 
-    let qualifying: HashSet<u64> = merged
+    let qualifying: FxHashSet<u64> = merged
         .into_iter()
         .filter(|(_, c)| *c >= min_packets)
         .map(|(id, _)| id)
