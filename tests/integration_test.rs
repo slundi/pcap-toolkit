@@ -1365,3 +1365,492 @@ fn test_export_format_parse_accepts_all_aliases() {
     assert_eq!(ExportFormat::parse("csv"), None);
     assert_eq!(ExportFormat::parse(""), None);
 }
+
+// ── #9: min-flow-packets integration tests ───────────────────────────────────
+
+/// Export skips flows that have fewer packets than the threshold.
+/// Mirrors the `resolve_min_flow_filter` pre-scan logic used by the CLI.
+#[test]
+fn test_export_min_flow_packets_excludes_small_flows() {
+    // Flow A: 3 packets (qualifies at threshold=2)
+    // Flow B: 1 packet  (excluded at threshold=2)
+    let fa = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 1000, 80, &[0u8; 8]);
+    let fb = eth_ipv4_udp([10, 0, 0, 3], [10, 0, 0, 4], 2000, 443, &[0u8; 8]);
+    let pcap_data = build_pcap(&[
+        (1, 0, fa.clone()),
+        (2, 0, fa.clone()),
+        (3, 0, fa.clone()),
+        (4, 0, fb.clone()),
+    ]);
+    let input = write_tmp_pcap("export_minfp_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_minfp_out.jsonl");
+
+    let counts = count_flows_in_file(&input, &Filter::default(), None, true).unwrap();
+    let qualifying: FxHashSet<u64> = counts
+        .into_iter()
+        .filter(|(_, c)| *c >= 2)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(qualifying.len(), 1, "only flow A should qualify");
+
+    let mut filter = Filter::default();
+    filter.flow_ids = qualifying;
+    filter.unidirectional = true;
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Json),
+        filter,
+        ..ExportOptions::default()
+    };
+    let report = export_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 3,
+        "only flow A's 3 packets exported"
+    );
+
+    let content = std::fs::read_to_string(&output).unwrap();
+    assert_eq!(content.lines().count(), 3);
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+/// A flow with exactly N packets meets the threshold and must be included.
+#[test]
+fn test_min_flow_packets_boundary_exactly_n_qualifies() {
+    let fa = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 1000, 80, &[]);
+    let fb = eth_ipv4_udp([10, 0, 0, 3], [10, 0, 0, 4], 2000, 443, &[]);
+    // Flow A: exactly 2 packets — threshold is 2 → must qualify.
+    // Flow B: 1 packet — must be excluded.
+    let pcap_data = build_pcap(&[(1, 0, fa.clone()), (2, 0, fa.clone()), (3, 0, fb.clone())]);
+    let input = write_tmp_pcap("minfp_boundary_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("minfp_boundary_out.pcap");
+
+    let counts = count_flows_in_file(&input, &Filter::default(), None, true).unwrap();
+    let qualifying: FxHashSet<u64> = counts
+        .into_iter()
+        .filter(|(_, c)| *c >= 2)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        qualifying.len(),
+        1,
+        "flow A (count == threshold) must qualify"
+    );
+
+    let mut filter = Filter::default();
+    filter.flow_ids = qualifying;
+    filter.unidirectional = true;
+
+    let opts = SortOptions {
+        output: output.clone(),
+        filter,
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 2,
+        "exactly-N flow should be included"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+/// When all packets belong to a single flow, min-flow-packets keeps them all.
+#[test]
+fn test_min_flow_packets_single_flow_all_qualify() {
+    let frame = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 443, 0x02, &[]);
+    let pcap_data = build_pcap(&[
+        (1, 0, frame.clone()),
+        (2, 0, frame.clone()),
+        (3, 0, frame.clone()),
+    ]);
+    let input = write_tmp_pcap("minfp_single_flow_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("minfp_single_flow_out.pcap");
+
+    let counts = count_flows_in_file(&input, &Filter::default(), None, false).unwrap();
+    assert_eq!(counts.len(), 1);
+    let qualifying: FxHashSet<u64> = counts
+        .into_iter()
+        .filter(|(_, c)| *c >= 3)
+        .map(|(id, _)| id)
+        .collect();
+
+    let mut filter = Filter::default();
+    filter.flow_ids = qualifying;
+
+    let opts = SortOptions {
+        output: output.clone(),
+        filter,
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 3,
+        "all packets from single qualifying flow"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+/// min-flow-packets across a two-file merge via `sort_files`:
+/// packets from qualifying flows survive after the merge.
+#[test]
+fn test_min_flow_packets_with_multi_file_sort() {
+    // File A: flow A (3 pkts) + flow B (1 pkt, will be excluded)
+    // File B: flow A (2 more pkts, same 5-tuple)
+    // Threshold = 4 → flow A qualifies (5 total), flow B does not (1 total)
+    let fa = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 1000, 80, &[]);
+    let fb = eth_ipv4_udp([10, 0, 0, 3], [10, 0, 0, 4], 2000, 443, &[]);
+
+    let pcap_a = build_pcap(&[
+        (1, 0, fa.clone()),
+        (2, 0, fa.clone()),
+        (3, 0, fa.clone()),
+        (4, 0, fb.clone()),
+    ]);
+    let pcap_b = build_pcap(&[(5, 0, fa.clone()), (6, 0, fa.clone())]);
+    let input_a = write_tmp_pcap("minfp_multi_a.pcap", &pcap_a);
+    let input_b = write_tmp_pcap("minfp_multi_b.pcap", &pcap_b);
+    let output = std::env::temp_dir().join("minfp_multi_out.pcap");
+
+    // Count across both files.
+    let paths: &[&std::path::Path] = &[input_a.as_path(), input_b.as_path()];
+    let mut merged: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    for path in paths {
+        let counts = count_flows_in_file(path, &Filter::default(), None, true).unwrap();
+        for (id, c) in counts {
+            *merged.entry(id).or_default() += c;
+        }
+    }
+    let qualifying: FxHashSet<u64> = merged
+        .into_iter()
+        .filter(|(_, c)| *c >= 4)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        qualifying.len(),
+        1,
+        "only flow A qualifies across both files"
+    );
+
+    let mut filter = Filter::default();
+    filter.flow_ids = qualifying;
+    filter.unidirectional = true;
+
+    let opts = SortOptions {
+        output: output.clone(),
+        filter,
+        ..SortOptions::default()
+    };
+    let report = sort_files(paths, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 5,
+        "all 5 flow-A packets from both files"
+    );
+
+    let _ = std::fs::remove_file(&input_a);
+    let _ = std::fs::remove_file(&input_b);
+    let _ = std::fs::remove_file(&output);
+}
+
+// ── #10: time-slice boundary and empty-window tests ──────────────────────────
+
+/// A packet whose timestamp falls exactly on a slice boundary (T == slice_start +
+/// slice_secs) opens a new output file — it must not go to the previous slice.
+#[test]
+fn test_sort_time_slice_packet_exactly_on_boundary_starts_new_file() {
+    let payload = vec![0xABu8; 20];
+    // Slice interval: 3600s (1 h).
+    // Packet 1 at T=0   → slice starting at 0s
+    // Packet 2 at T=3600 exactly → must trigger rotation → new slice starting at 3600s
+    let pcap_data = build_pcap(&[(0, 0, payload.clone()), (3600, 0, payload.clone())]);
+
+    let input = write_tmp_pcap("slice_boundary_in.pcap", &pcap_data);
+    let out_dir = std::env::temp_dir().join("pcap_slice_boundary_out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let opts = SortOptions {
+        output: out_dir.clone(),
+        slice_secs: Some(3600),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+
+    assert_eq!(report.packets_written, 2);
+    assert_eq!(
+        report.files_written.len(),
+        2,
+        "boundary packet must open a new file"
+    );
+
+    // First file has 1 packet (T=0), second file has 1 packet (T=3600).
+    let mut sizes: Vec<u64> = report
+        .files_written
+        .iter()
+        .map(|f| {
+            let b = std::fs::read(f).unwrap();
+            let _ = std::fs::remove_file(f);
+            // Subtract 24-byte global header; each packet record is 16 + payload_len.
+            let pkt_bytes = b.len() as u64 - 24;
+            pkt_bytes / (16 + 20) // records
+        })
+        .collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes, vec![1, 1], "one packet per slice");
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_dir(&out_dir);
+}
+
+/// When packets skip an entire slice interval, no output file is produced for
+/// the empty window — the writer must not create zero-byte files.
+#[test]
+fn test_sort_time_slice_empty_window_produces_no_file() {
+    let payload = vec![0xCDu8; 20];
+    // Slice interval: 3600s.
+    // Packet 1 at T=0     → slice 0 (0..3600s)
+    // Packet 2 at T=7201  → slice 2 (7200..10800s)   — slice 1 is empty
+    let pcap_data = build_pcap(&[(0, 0, payload.clone()), (7201, 0, payload.clone())]);
+
+    let input = write_tmp_pcap("slice_empty_window_in.pcap", &pcap_data);
+    let out_dir = std::env::temp_dir().join("pcap_slice_empty_window_out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let opts = SortOptions {
+        output: out_dir.clone(),
+        slice_secs: Some(3600),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+
+    assert_eq!(report.packets_written, 2);
+    assert_eq!(
+        report.files_written.len(),
+        2,
+        "only two files: no file for the empty intermediate slice"
+    );
+
+    for f in &report.files_written {
+        let bytes = std::fs::read(f).unwrap();
+        assert!(
+            bytes.len() > 24,
+            "each output file must contain at least one packet record"
+        );
+        let _ = std::fs::remove_file(f);
+    }
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_dir(&out_dir);
+}
+
+/// Three consecutive packets that all fall within the same slice produce a
+/// single output file.
+#[test]
+fn test_sort_time_slice_all_same_window_single_file() {
+    let payload = vec![0xEFu8; 20];
+    let pcap_data = build_pcap(&[
+        (100, 0, payload.clone()),
+        (200, 0, payload.clone()),
+        (3599, 0, payload.clone()), // still within the first 3600s window
+    ]);
+
+    let input = write_tmp_pcap("slice_same_window_in.pcap", &pcap_data);
+    let out_dir = std::env::temp_dir().join("pcap_slice_same_window_out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let opts = SortOptions {
+        output: out_dir.clone(),
+        slice_secs: Some(3600),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+
+    assert_eq!(report.packets_written, 3);
+    assert_eq!(
+        report.files_written.len(),
+        1,
+        "all three packets in one slice"
+    );
+
+    for f in &report.files_written {
+        let _ = std::fs::remove_file(f);
+    }
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_dir(&out_dir);
+}
+
+// ── #11: compound BPF expression integration tests ───────────────────────────
+
+/// `not udp` passes TCP and ICMP but drops UDP packets.
+#[test]
+fn test_bpf_not_udp_excludes_udp_keeps_others() {
+    let tcp = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 80, 0x02, &[]);
+    let udp = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 5001, 53, &[]);
+    let pcap_data = build_pcap(&[(1, 0, tcp), (2, 0, udp)]);
+    let input = write_tmp_pcap("bpf_not_udp_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("bpf_not_udp_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        bpf_filter: Some(bpf::parse("not udp").unwrap()),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(report.packets_written, 1, "only TCP should pass 'not udp'");
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+/// `tcp or udp` passes both TCP and UDP but not non-IP frames.
+#[test]
+fn test_bpf_tcp_or_udp_passes_both_protocols() {
+    let tcp = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 443, 0x02, &[]);
+    let udp = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 5001, 53, &[]);
+    // Raw ARP-like frame (no IP layer).
+    let arp = vec![
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08,
+        0x06, // EtherType = ARP
+        0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x0a,
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x02,
+    ];
+    let pcap_data = build_pcap(&[(1, 0, tcp), (2, 0, udp), (3, 0, arp)]);
+    let input = write_tmp_pcap("bpf_tcp_or_udp_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("bpf_tcp_or_udp_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        bpf_filter: Some(bpf::parse("tcp or udp").unwrap()),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(report.packets_written, 2, "TCP and UDP pass; ARP must not");
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+/// Nested parentheses: `(tcp and port 80) or (udp and port 53)`.
+/// Packets matching either sub-expression pass; all others are dropped.
+#[test]
+fn test_bpf_nested_parentheses_or_of_and() {
+    let tcp80 = eth_ipv4_tcp([1, 2, 3, 4], [5, 6, 7, 8], 5000, 80, 0x02, &[]);
+    let udp53 = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 5001, 53, &[]);
+    let tcp443 = eth_ipv4_tcp([1, 2, 3, 4], [5, 6, 7, 8], 5002, 443, 0x02, &[]); // no match
+    let udp80 = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 5003, 80, &[]); // port matches but wrong proto half
+
+    let pcap_data = build_pcap(&[(1, 0, tcp80), (2, 0, udp53), (3, 0, tcp443), (4, 0, udp80)]);
+    let input = write_tmp_pcap("bpf_nested_or_and_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("bpf_nested_or_and_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        bpf_filter: Some(bpf::parse("(tcp and port 80) or (udp and port 53)").unwrap()),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 2,
+        "only TCP/80 and UDP/53 should pass"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+/// Precedence: `tcp and port 80 or udp` parses as `(tcp and port 80) or udp`.
+/// UDP packets must pass even though their port is not 80.
+#[test]
+fn test_bpf_precedence_and_binds_tighter_than_or() {
+    let tcp80 = eth_ipv4_tcp([1, 2, 3, 4], [5, 6, 7, 8], 5000, 80, 0x02, &[]);
+    let tcp443 = eth_ipv4_tcp([1, 2, 3, 4], [5, 6, 7, 8], 5001, 443, 0x02, &[]); // must NOT pass
+    let udp53 = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 5002, 53, &[]); // must pass (UDP)
+    let udp443 = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 5003, 443, &[]); // must pass (UDP)
+
+    let pcap_data = build_pcap(&[(1, 0, tcp80), (2, 0, tcp443), (3, 0, udp53), (4, 0, udp443)]);
+    let input = write_tmp_pcap("bpf_precedence_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("bpf_precedence_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        bpf_filter: Some(bpf::parse("tcp and port 80 or udp").unwrap()),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 3,
+        "TCP/80 + both UDP packets; TCP/443 must be excluded"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+/// `not (tcp or udp)` keeps non-IP frames and drops all TCP/UDP.
+#[test]
+fn test_bpf_not_of_or_group_keeps_non_ip() {
+    let tcp = eth_ipv4_tcp([10, 0, 0, 1], [10, 0, 0, 2], 5000, 80, 0x02, &[]);
+    let udp = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 5001, 53, &[]);
+    let arp = vec![
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08, 0x06, 0x00,
+        0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x0a, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x02,
+    ];
+    let pcap_data = build_pcap(&[(1, 0, tcp), (2, 0, udp), (3, 0, arp)]);
+    let input = write_tmp_pcap("bpf_not_or_group_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("bpf_not_or_group_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        bpf_filter: Some(bpf::parse("not (tcp or udp)").unwrap()),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 1,
+        "only non-IP ARP frame should pass"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+/// `tcp and src net 10.0.0.0/8 and not dst port 80` — three-clause compound.
+#[test]
+fn test_bpf_three_clause_compound() {
+    // Passes: TCP, from 10.x, not dst 80
+    let pass = eth_ipv4_tcp([10, 0, 0, 1], [8, 8, 8, 8], 5000, 443, 0x02, &[]);
+    // Fails: TCP, from 10.x, but dst 80
+    let fail_port = eth_ipv4_tcp([10, 0, 0, 1], [8, 8, 8, 8], 5001, 80, 0x02, &[]);
+    // Fails: TCP, not from 10.x
+    let fail_net = eth_ipv4_tcp([192, 168, 1, 1], [8, 8, 8, 8], 5002, 443, 0x02, &[]);
+    // Fails: UDP from 10.x (wrong proto)
+    let fail_proto = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 5003, 443, &[]);
+
+    let pcap_data = build_pcap(&[
+        (1, 0, pass),
+        (2, 0, fail_port),
+        (3, 0, fail_net),
+        (4, 0, fail_proto),
+    ]);
+    let input = write_tmp_pcap("bpf_three_clause_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("bpf_three_clause_out.pcap");
+
+    let opts = SortOptions {
+        output: output.clone(),
+        bpf_filter: Some(bpf::parse("tcp and src net 10.0.0.0/8 and not dst port 80").unwrap()),
+        ..SortOptions::default()
+    };
+    let report = sort_file(&input, &opts).unwrap();
+    assert_eq!(
+        report.packets_written, 1,
+        "only the first packet passes all clauses"
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
