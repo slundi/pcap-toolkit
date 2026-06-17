@@ -342,11 +342,14 @@ fn build_record(
 ) -> PacketRecord {
     let (src_ip, dst_ip, src_port, dst_port, protocol, flow_id) =
         if let Some(ref key) = meta.flow_key {
+            // Ports are only meaningful for TCP (6) and UDP (17); emit None for
+            // all other protocols (e.g. ICMP) to avoid misleading zero values.
+            let port = matches!(key.protocol, 6 | 17);
             (
                 Some(key.src_ip),
                 Some(key.dst_ip),
-                Some(key.src_port),
-                Some(key.dst_port),
+                port.then_some(key.src_port),
+                port.then_some(key.dst_port),
                 Some(key.protocol),
                 Some(key.flow_id(unidirectional)),
             )
@@ -373,5 +376,117 @@ fn build_record(
         origlen: packet.info.original_len,
         tcp_flags,
         payload: packet.data.clone(),
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use crate::filter::{PacketMeta, TcpFlagsFilter};
+    use crate::flow::FlowKey;
+    use crate::pcap::{PacketData, PacketInfo};
+
+    use super::*;
+
+    fn make_packet(caplen: u32) -> PacketData {
+        PacketData {
+            info: PacketInfo {
+                timestamp_ns: 0,
+                captured_len: caplen,
+                original_len: caplen,
+                flow_key: None,
+            },
+            data: vec![0u8; caplen as usize],
+        }
+    }
+
+    fn make_meta(src: IpAddr, dst: IpAddr, sport: u16, dport: u16, proto: u8) -> PacketMeta {
+        PacketMeta {
+            timestamp_ns: 0,
+            captured_len: 60,
+            flow_key: Some(FlowKey::new(src, dst, sport, dport, proto)),
+            tcp_flags: 0,
+        }
+    }
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn test_build_record_tcp_has_ports() {
+        let pkt = make_packet(60);
+        let meta = make_meta(v4(1, 2, 3, 4), v4(5, 6, 7, 8), 1234, 443, 6);
+        let rec = build_record(&pkt, &meta, false);
+        assert_eq!(rec.src_port, Some(1234));
+        assert_eq!(rec.dst_port, Some(443));
+    }
+
+    #[test]
+    fn test_build_record_udp_has_ports() {
+        let pkt = make_packet(60);
+        let meta = make_meta(v4(1, 2, 3, 4), v4(5, 6, 7, 8), 5000, 53, 17);
+        let rec = build_record(&pkt, &meta, false);
+        assert_eq!(rec.src_port, Some(5000));
+        assert_eq!(rec.dst_port, Some(53));
+    }
+
+    #[test]
+    fn test_build_record_icmp_ports_are_none() {
+        let pkt = make_packet(60);
+        // ICMP (protocol 1): FlowKey stores src_port=0/dst_port=0 by convention,
+        // but the export record must emit None rather than Some(0).
+        let meta = make_meta(v4(1, 2, 3, 4), v4(5, 6, 7, 8), 0, 0, 1);
+        let rec = build_record(&pkt, &meta, false);
+        assert_eq!(rec.src_port, None, "ICMP src_port must be None");
+        assert_eq!(rec.dst_port, None, "ICMP dst_port must be None");
+    }
+
+    #[test]
+    fn test_build_record_icmpv6_ports_are_none() {
+        let pkt = make_packet(60);
+        let meta = make_meta(v4(1, 2, 3, 4), v4(5, 6, 7, 8), 0, 0, 58);
+        let rec = build_record(&pkt, &meta, false);
+        assert_eq!(rec.src_port, None);
+        assert_eq!(rec.dst_port, None);
+    }
+
+    #[test]
+    fn test_build_record_non_ip_all_flow_fields_none() {
+        let pkt = make_packet(60);
+        let meta = PacketMeta {
+            timestamp_ns: 1_000,
+            captured_len: 60,
+            flow_key: None,
+            tcp_flags: 0,
+        };
+        let rec = build_record(&pkt, &meta, false);
+        assert_eq!(rec.src_ip, None);
+        assert_eq!(rec.dst_ip, None);
+        assert_eq!(rec.src_port, None);
+        assert_eq!(rec.dst_port, None);
+        assert_eq!(rec.protocol, None);
+        assert_eq!(rec.flow_id, None);
+        assert_eq!(rec.tcp_flags, None);
+    }
+
+    #[test]
+    fn test_build_record_tcp_flags_only_for_tcp() {
+        let pkt = make_packet(60);
+
+        // UDP: tcp_flags must be None even when the meta field is non-zero.
+        let mut meta = make_meta(v4(1, 2, 3, 4), v4(5, 6, 7, 8), 100, 200, 17);
+        meta.tcp_flags = 0x02; // SYN bit set, but protocol is UDP
+        let rec = build_record(&pkt, &meta, false);
+        assert_eq!(rec.tcp_flags, None);
+
+        // TCP: tcp_flags must be Some.
+        let mut meta = make_meta(v4(1, 2, 3, 4), v4(5, 6, 7, 8), 100, 80, 6);
+        meta.tcp_flags = TcpFlagsFilter::parse("SYN+ACK").unwrap().mask;
+        let rec = build_record(&pkt, &meta, false);
+        assert_eq!(rec.tcp_flags, Some(0x12));
     }
 }
