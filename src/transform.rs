@@ -542,7 +542,11 @@ fn do_truncate(data: &mut Vec<u8>, max_bytes: u32, origlen: u32) -> (u32, bool) 
                     if data.len() < ts + 20 {
                         return (origlen, false);
                     }
-                    ((data[ts + 12] >> 4) * 4) as usize
+                    let th = ((data[ts + 12] >> 4) * 4) as usize;
+                    if th < 20 {
+                        return (origlen, false);
+                    }
+                    th
                 }
                 PROTO_UDP => 8,
                 _ => return (origlen, false),
@@ -560,7 +564,11 @@ fn do_truncate(data: &mut Vec<u8>, max_bytes: u32, origlen: u32) -> (u32, bool) 
                     if data.len() < ts + 20 {
                         return (origlen, false);
                     }
-                    ((data[ts + 12] >> 4) * 4) as usize
+                    let th = ((data[ts + 12] >> 4) * 4) as usize;
+                    if th < 20 {
+                        return (origlen, false);
+                    }
+                    th
                 }
                 PROTO_UDP => 8,
                 _ => return (origlen, false),
@@ -1438,5 +1446,102 @@ mod tests {
         assert_eq!(u16::from_be_bytes([data[12], data[13]]), ET_IPV6);
         // Ethernet(14) + IPv6(40) + UDP(8) + 10 = 72
         assert_eq!(data.len(), 72);
+    }
+
+    // ── Corrupt TCP data-offset ───────────────────────────────────────────────
+
+    #[test]
+    fn test_truncation_tcp_corrupt_data_offset_ipv4_rejected() {
+        // Build a valid IPv4/TCP frame, then corrupt the data-offset nibble to 4
+        // (16 bytes < 20-byte minimum). Truncation must be skipped entirely.
+        let mut data = eth_ipv4_tcp([1, 2, 3, 4], [5, 6, 7, 8], 100, 443, &[0xAA; 30]);
+        // TCP data-offset byte: Ethernet(14) + IPv4(20) + TCP offset 12 = index 46.
+        // Nibble 4 → 4*4 = 16 bytes, which is below the 20-byte minimum.
+        data[46] = 0x40;
+        let original = data.clone();
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            max_payload_bytes: Some(0),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        assert_eq!(
+            data, original,
+            "corrupt data-offset must leave packet unchanged"
+        );
+    }
+
+    #[test]
+    fn test_truncation_tcp_corrupt_data_offset_ipv6_rejected() {
+        // Same check for an IPv6/TCP frame.
+        // Build frame manually: Ethernet(14) + IPv6(40) + TCP(20) + payload.
+        let payload = [0xBB; 30];
+        let tcp_len = (20 + payload.len()) as u16;
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0xFF; 6]); // dst MAC
+        f.extend_from_slice(&[0x00; 6]); // src MAC
+        f.extend_from_slice(&[0x86, 0xDD]); // IPv6
+        f.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]); // version=6
+        f.extend_from_slice(&tcp_len.to_be_bytes()); // payload length
+        f.push(6); // next header = TCP
+        f.push(64); // hop limit
+        f.extend_from_slice(&[0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]); // src
+        f.extend_from_slice(&[0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]); // dst
+        // TCP header (20 bytes)
+        f.extend_from_slice(&100u16.to_be_bytes()); // sport
+        f.extend_from_slice(&443u16.to_be_bytes()); // dport
+        f.extend_from_slice(&[0x00; 4]); // seq
+        f.extend_from_slice(&[0x00; 4]); // ack
+        f.push(0x50); // data offset = 5 (will be corrupted below)
+        f.push(0x02); // SYN
+        f.extend_from_slice(&[0xFF, 0xFF]); // window
+        f.extend_from_slice(&[0x00, 0x00]); // checksum
+        f.extend_from_slice(&[0x00, 0x00]); // urgent
+        f.extend_from_slice(&payload);
+        // TCP data-offset byte: Ethernet(14) + IPv6(40) + TCP offset 12 = index 66.
+        f[66] = 0x30; // nibble 3 → 3*4 = 12 bytes < 20-byte minimum
+        let original = f.clone();
+        let orig = f.len() as u32;
+        let opts = TransformOptions {
+            max_payload_bytes: Some(0),
+            ..Default::default()
+        };
+        apply(&mut f, 0, 0, orig, &opts);
+        assert_eq!(
+            f, original,
+            "corrupt data-offset must leave packet unchanged"
+        );
+    }
+
+    #[test]
+    fn test_truncation_tcp_zero_data_offset_rejected() {
+        // data-offset nibble = 0 → th = 0, which is also < 20.
+        let mut data = eth_ipv4_tcp([1, 2, 3, 4], [5, 6, 7, 8], 100, 80, &[0xCC; 10]);
+        data[46] = 0x00;
+        let original = data.clone();
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            max_payload_bytes: Some(0),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        assert_eq!(data, original);
+    }
+
+    #[test]
+    fn test_truncation_tcp_min_valid_data_offset_accepted() {
+        // data-offset nibble = 5 → th = 20 bytes (minimum valid). Truncation
+        // must proceed normally.
+        let payload = vec![0xDD; 50];
+        let mut data = eth_ipv4_tcp([1, 2, 3, 4], [5, 6, 7, 8], 100, 443, &payload);
+        // data[46] is already 0x50 (offset = 5) from the helper.
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            max_payload_bytes: Some(10),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        // Ethernet(14) + IPv4(20) + TCP(20) + 10 = 64
+        assert_eq!(data.len(), 64);
     }
 }
