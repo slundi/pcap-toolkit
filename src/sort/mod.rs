@@ -100,8 +100,24 @@ pub fn sort_files(inputs: &[&Path], opts: &SortOptions) -> Result<SortReport, So
         .collect();
 
     let mut headers_and_stores: Vec<(GlobalHeader, IndexStore)> = Vec::with_capacity(inputs.len());
+    let mut first_err: Option<SortError> = None;
     for r in results {
-        headers_and_stores.push(r?);
+        match r {
+            Ok(hs) => headers_and_stores.push(hs),
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    if let Some(e) = first_err {
+        for (_, store) in &headers_and_stores {
+            if let Some(p) = store.sidecar_path() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        return Err(e);
     }
 
     // ── Link-type compatibility check ─────────────────────────────────────
@@ -196,13 +212,18 @@ fn first_pass(
     let mut reader =
         LegacyPcapReader::new(BUF_SIZE, file).map_err(|e| SortError::Parse(format!("{e:?}")))?;
 
-    let store = if on_disk {
-        IndexStore::disk(&sidecar_path(input))?
-    } else {
-        IndexStore::memory()
+    let sidecar = on_disk.then(|| sidecar_path(input));
+    let store = match &sidecar {
+        Some(p) => IndexStore::disk(p)?,
+        None => IndexStore::memory(),
     };
 
-    first_pass_inner(&mut reader, store, filter, bpf)
+    first_pass_inner(&mut reader, store, filter, bpf).map_err(|e| {
+        if let Some(p) = &sidecar {
+            let _ = std::fs::remove_file(p);
+        }
+        e
+    })
 }
 
 fn first_pass_inner<R: std::io::Read>(
