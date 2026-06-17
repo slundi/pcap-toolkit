@@ -174,73 +174,151 @@ fn cmd_sort(args: &cli::SortArgs, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Construct a [`Filter`] from the CLI arguments on the `sort` subcommand.
-fn build_filter(args: &cli::SortArgs) -> Result<Filter> {
+/// Common filter fields shared by the `sort`, `export`, and `replay` subcommands.
+///
+/// Implemented by each subcommand's argument struct so that [`build_filter`] can
+/// be written once instead of once per subcommand.
+trait FilterArgs {
+    fn proto(&self) -> Option<&str>;
+    fn src_ip(&self) -> &[String];
+    fn dst_ip(&self) -> &[String];
+    fn ip(&self) -> &[String];
+    fn src_port(&self) -> &[String];
+    fn dst_port(&self) -> &[String];
+    fn port(&self) -> &[String];
+    fn flow_id(&self) -> Option<&str>;
+    fn from(&self) -> Option<&str>;
+    fn to(&self) -> Option<&str>;
+    fn tcp_flags(&self) -> Option<&str>;
+    fn min_len(&self) -> Option<u32>;
+    fn max_len(&self) -> Option<u32>;
+    fn unidirectional(&self) -> bool;
+    fn negate(&self) -> bool;
+}
+
+macro_rules! impl_filter_args {
+    ($T:ty) => {
+        impl FilterArgs for $T {
+            fn proto(&self) -> Option<&str> {
+                self.proto.as_deref()
+            }
+            fn src_ip(&self) -> &[String] {
+                &self.src_ip
+            }
+            fn dst_ip(&self) -> &[String] {
+                &self.dst_ip
+            }
+            fn ip(&self) -> &[String] {
+                &self.ip
+            }
+            fn src_port(&self) -> &[String] {
+                &self.src_port
+            }
+            fn dst_port(&self) -> &[String] {
+                &self.dst_port
+            }
+            fn port(&self) -> &[String] {
+                &self.port
+            }
+            fn flow_id(&self) -> Option<&str> {
+                self.flow_id.as_deref()
+            }
+            fn from(&self) -> Option<&str> {
+                self.from.as_deref()
+            }
+            fn to(&self) -> Option<&str> {
+                self.to.as_deref()
+            }
+            fn tcp_flags(&self) -> Option<&str> {
+                self.tcp_flags.as_deref()
+            }
+            fn min_len(&self) -> Option<u32> {
+                self.min_len
+            }
+            fn max_len(&self) -> Option<u32> {
+                self.max_len
+            }
+            fn unidirectional(&self) -> bool {
+                self.unidirectional
+            }
+            fn negate(&self) -> bool {
+                self.negate
+            }
+        }
+    };
+}
+
+impl_filter_args!(cli::SortArgs);
+impl_filter_args!(cli::export::ExportArgs);
+impl_filter_args!(cli::replay::ReplayArgs);
+
+/// Construct a [`Filter`] from any subcommand argument struct that implements [`FilterArgs`].
+fn build_filter<A: FilterArgs>(args: &A) -> Result<Filter> {
     let mut f = Filter {
-        unidirectional: args.unidirectional,
-        negate: args.negate,
+        unidirectional: args.unidirectional(),
+        negate: args.negate(),
         ..Filter::default()
     };
 
-    if let Some(proto_str) = &args.proto {
+    if let Some(proto_str) = args.proto() {
         f.protocols = parse_proto_list(proto_str)
             .with_context(|| format!("invalid --proto value '{proto_str}'"))?;
     }
 
-    for s in &args.src_ip {
+    for s in args.src_ip() {
         f.src_ips
             .push(IpNet::parse(s).with_context(|| format!("invalid --src-ip value '{s}'"))?);
     }
-    for s in &args.dst_ip {
+    for s in args.dst_ip() {
         f.dst_ips
             .push(IpNet::parse(s).with_context(|| format!("invalid --dst-ip value '{s}'"))?);
     }
-    for s in &args.ip {
+    for s in args.ip() {
         f.ips
             .push(IpNet::parse(s).with_context(|| format!("invalid --ip value '{s}'"))?);
     }
 
-    for s in &args.src_port {
+    for s in args.src_port() {
         f.src_ports
             .push(PortRange::parse(s).with_context(|| format!("invalid --src-port value '{s}'"))?);
     }
-    for s in &args.dst_port {
+    for s in args.dst_port() {
         f.dst_ports
             .push(PortRange::parse(s).with_context(|| format!("invalid --dst-port value '{s}'"))?);
     }
-    for s in &args.port {
+    for s in args.port() {
         f.ports
             .push(PortRange::parse(s).with_context(|| format!("invalid --port value '{s}'"))?);
     }
 
-    if let Some(ids_str) = &args.flow_id {
+    if let Some(ids_str) = args.flow_id() {
         f.flow_ids = parse_flow_ids(ids_str)
             .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?
             .into_iter()
             .collect();
     }
 
-    if let Some(from_str) = &args.from {
+    if let Some(from_str) = args.from() {
         f.from_ns = Some(
             parse_datetime_ns(from_str)
                 .with_context(|| format!("invalid --from value '{from_str}'"))?,
         );
     }
-    if let Some(to_str) = &args.to {
+    if let Some(to_str) = args.to() {
         f.to_ns = Some(
             parse_datetime_ns(to_str).with_context(|| format!("invalid --to value '{to_str}'"))?,
         );
     }
 
-    if let Some(flags_str) = &args.tcp_flags {
+    if let Some(flags_str) = args.tcp_flags() {
         f.tcp_flags = Some(
             TcpFlagsFilter::parse(flags_str)
                 .with_context(|| format!("invalid --tcp-flags value '{flags_str}'"))?,
         );
     }
 
-    f.min_len = args.min_len;
-    f.max_len = args.max_len;
+    f.min_len = args.min_len();
+    f.max_len = args.max_len();
 
     Ok(f)
 }
@@ -313,7 +391,7 @@ fn cmd_export(args: &crate::cli::export::ExportArgs, config: &Config) -> Result<
         );
     }
 
-    let filter = build_export_filter(args)?;
+    let filter = build_filter(args)?;
     let bpf_filter = args
         .filter_expr
         .as_deref()
@@ -411,77 +489,6 @@ fn cmd_export(args: &crate::cli::export::ExportArgs, config: &Config) -> Result<
     Ok(())
 }
 
-/// Build a [`Filter`] from the `export` subcommand CLI arguments.
-fn build_export_filter(args: &crate::cli::export::ExportArgs) -> Result<Filter> {
-    let mut f = Filter {
-        unidirectional: args.unidirectional,
-        negate: args.negate,
-        ..Filter::default()
-    };
-
-    if let Some(proto_str) = &args.proto {
-        f.protocols = parse_proto_list(proto_str)
-            .with_context(|| format!("invalid --proto value '{proto_str}'"))?;
-    }
-
-    for s in &args.src_ip {
-        f.src_ips
-            .push(IpNet::parse(s).with_context(|| format!("invalid --src-ip value '{s}'"))?);
-    }
-    for s in &args.dst_ip {
-        f.dst_ips
-            .push(IpNet::parse(s).with_context(|| format!("invalid --dst-ip value '{s}'"))?);
-    }
-    for s in &args.ip {
-        f.ips
-            .push(IpNet::parse(s).with_context(|| format!("invalid --ip value '{s}'"))?);
-    }
-
-    for s in &args.src_port {
-        f.src_ports
-            .push(PortRange::parse(s).with_context(|| format!("invalid --src-port value '{s}'"))?);
-    }
-    for s in &args.dst_port {
-        f.dst_ports
-            .push(PortRange::parse(s).with_context(|| format!("invalid --dst-port value '{s}'"))?);
-    }
-    for s in &args.port {
-        f.ports
-            .push(PortRange::parse(s).with_context(|| format!("invalid --port value '{s}'"))?);
-    }
-
-    if let Some(ids_str) = &args.flow_id {
-        f.flow_ids = parse_flow_ids(ids_str)
-            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?
-            .into_iter()
-            .collect();
-    }
-
-    if let Some(from_str) = &args.from {
-        f.from_ns = Some(
-            parse_datetime_ns(from_str)
-                .with_context(|| format!("invalid --from value '{from_str}'"))?,
-        );
-    }
-    if let Some(to_str) = &args.to {
-        f.to_ns = Some(
-            parse_datetime_ns(to_str).with_context(|| format!("invalid --to value '{to_str}'"))?,
-        );
-    }
-
-    if let Some(flags_str) = &args.tcp_flags {
-        f.tcp_flags = Some(
-            TcpFlagsFilter::parse(flags_str)
-                .with_context(|| format!("invalid --tcp-flags value '{flags_str}'"))?,
-        );
-    }
-
-    f.min_len = args.min_len;
-    f.max_len = args.max_len;
-
-    Ok(f)
-}
-
 fn cmd_replay(args: &crate::cli::replay::ReplayArgs) -> Result<()> {
     if args.interfaces.is_empty() {
         anyhow::bail!("at least one --interface is required");
@@ -502,7 +509,7 @@ fn cmd_replay(args: &crate::cli::replay::ReplayArgs) -> Result<()> {
         ReplaySpeed::RealTime
     };
 
-    let filter = build_replay_filter(args)?;
+    let filter = build_filter(args)?;
 
     let bpf_filter = args
         .filter_expr
@@ -539,77 +546,6 @@ fn cmd_replay(args: &crate::cli::replay::ReplayArgs) -> Result<()> {
         report.packets_sent, report.bytes_sent, iface_list
     );
     Ok(())
-}
-
-/// Build a [`Filter`] from the `replay` subcommand CLI arguments.
-fn build_replay_filter(args: &crate::cli::replay::ReplayArgs) -> Result<Filter> {
-    let mut f = Filter {
-        unidirectional: args.unidirectional,
-        negate: args.negate,
-        ..Filter::default()
-    };
-
-    if let Some(proto_str) = &args.proto {
-        f.protocols = parse_proto_list(proto_str)
-            .with_context(|| format!("invalid --proto value '{proto_str}'"))?;
-    }
-
-    for s in &args.src_ip {
-        f.src_ips
-            .push(IpNet::parse(s).with_context(|| format!("invalid --src-ip value '{s}'"))?);
-    }
-    for s in &args.dst_ip {
-        f.dst_ips
-            .push(IpNet::parse(s).with_context(|| format!("invalid --dst-ip value '{s}'"))?);
-    }
-    for s in &args.ip {
-        f.ips
-            .push(IpNet::parse(s).with_context(|| format!("invalid --ip value '{s}'"))?);
-    }
-
-    for s in &args.src_port {
-        f.src_ports
-            .push(PortRange::parse(s).with_context(|| format!("invalid --src-port value '{s}'"))?);
-    }
-    for s in &args.dst_port {
-        f.dst_ports
-            .push(PortRange::parse(s).with_context(|| format!("invalid --dst-port value '{s}'"))?);
-    }
-    for s in &args.port {
-        f.ports
-            .push(PortRange::parse(s).with_context(|| format!("invalid --port value '{s}'"))?);
-    }
-
-    if let Some(ids_str) = &args.flow_id {
-        f.flow_ids = parse_flow_ids(ids_str)
-            .with_context(|| format!("invalid --flow-id value '{ids_str}'"))?
-            .into_iter()
-            .collect();
-    }
-
-    if let Some(from_str) = &args.from {
-        f.from_ns = Some(
-            parse_datetime_ns(from_str)
-                .with_context(|| format!("invalid --from value '{from_str}'"))?,
-        );
-    }
-    if let Some(to_str) = &args.to {
-        f.to_ns = Some(
-            parse_datetime_ns(to_str).with_context(|| format!("invalid --to value '{to_str}'"))?,
-        );
-    }
-
-    if let Some(flags_str) = &args.tcp_flags {
-        f.tcp_flags = Some(
-            TcpFlagsFilter::parse(flags_str)
-                .with_context(|| format!("invalid --tcp-flags value '{flags_str}'"))?,
-        );
-    }
-
-    f.min_len = args.min_len;
-    f.max_len = args.max_len;
-
-    Ok(f)
 }
 
 /// Pre-scan `inputs` to count packets per flow, then restrict `filter` to only
@@ -667,5 +603,256 @@ fn format_duration(d: chrono::Duration) -> String {
         format!("{}m {}s", secs / 60, secs % 60)
     } else {
         format!("{}h {}m {}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // ── Minimal arg constructors ──────────────────────────────────────────────
+
+    fn sort_args() -> cli::SortArgs {
+        cli::SortArgs {
+            inputs: vec![],
+            output: PathBuf::from("/dev/null"),
+            slice: None,
+            on_disk: false,
+            proto: None,
+            src_ip: vec![],
+            dst_ip: vec![],
+            ip: vec![],
+            src_port: vec![],
+            dst_port: vec![],
+            port: vec![],
+            flow_id: None,
+            from: None,
+            to: None,
+            tcp_flags: None,
+            min_len: None,
+            max_len: None,
+            unidirectional: false,
+            negate: false,
+            filter_expr: None,
+            min_flow_packets: None,
+            max_payload_bytes: None,
+            timestamp_start: None,
+            replace_ip: vec![],
+        }
+    }
+
+    fn export_args() -> cli::export::ExportArgs {
+        cli::export::ExportArgs {
+            input: PathBuf::from("/dev/null"),
+            outputs: vec![],
+            format: None,
+            compress_payload: false,
+            proto: None,
+            src_ip: vec![],
+            dst_ip: vec![],
+            ip: vec![],
+            src_port: vec![],
+            dst_port: vec![],
+            port: vec![],
+            flow_id: None,
+            from: None,
+            to: None,
+            tcp_flags: None,
+            min_len: None,
+            max_len: None,
+            unidirectional: false,
+            negate: false,
+            filter_expr: None,
+            min_flow_packets: None,
+        }
+    }
+
+    fn replay_args() -> cli::replay::ReplayArgs {
+        cli::replay::ReplayArgs {
+            input: PathBuf::from("/dev/null"),
+            interfaces: vec![],
+            speed: None,
+            pps: None,
+            proto: None,
+            src_ip: vec![],
+            dst_ip: vec![],
+            ip: vec![],
+            src_port: vec![],
+            dst_port: vec![],
+            port: vec![],
+            flow_id: None,
+            from: None,
+            to: None,
+            tcp_flags: None,
+            min_len: None,
+            max_len: None,
+            unidirectional: false,
+            negate: false,
+            filter_expr: None,
+            min_flow_packets: None,
+        }
+    }
+
+    // ── build_filter tests — all three arg types produce identical Filters ────
+
+    #[test]
+    fn test_build_filter_empty_yields_default() {
+        let fs = build_filter(&sort_args()).unwrap();
+        let fe = build_filter(&export_args()).unwrap();
+        let fr = build_filter(&replay_args()).unwrap();
+        assert!(fs.protocols.is_empty());
+        assert!(fe.protocols.is_empty());
+        assert!(fr.protocols.is_empty());
+        assert!(!fs.negate);
+        assert!(!fs.unidirectional);
+    }
+
+    #[test]
+    fn test_build_filter_proto_parsed_for_all_arg_types() {
+        let mut s = sort_args();
+        s.proto = Some("tcp,udp".to_string());
+        let mut e = export_args();
+        e.proto = Some("tcp,udp".to_string());
+        let mut r = replay_args();
+        r.proto = Some("tcp,udp".to_string());
+
+        for f in [
+            build_filter(&s).unwrap(),
+            build_filter(&e).unwrap(),
+            build_filter(&r).unwrap(),
+        ] {
+            assert!(f.protocols.contains(&6), "TCP missing");
+            assert!(f.protocols.contains(&17), "UDP missing");
+        }
+    }
+
+    #[test]
+    fn test_build_filter_src_dst_ip_parsed() {
+        let mut s = sort_args();
+        s.src_ip = vec!["10.0.0.0/8".to_string()];
+        s.dst_ip = vec!["192.168.1.1/32".to_string()];
+        let f = build_filter(&s).unwrap();
+        assert_eq!(f.src_ips.len(), 1);
+        assert_eq!(f.dst_ips.len(), 1);
+    }
+
+    #[test]
+    fn test_build_filter_either_endpoint_ip() {
+        let mut s = sort_args();
+        s.ip = vec!["172.16.0.0/12".to_string()];
+        let f = build_filter(&s).unwrap();
+        assert_eq!(f.ips.len(), 1);
+    }
+
+    #[test]
+    fn test_build_filter_ports_parsed() {
+        let mut s = sort_args();
+        s.src_port = vec!["1024-65535".to_string()];
+        s.dst_port = vec!["443".to_string()];
+        s.port = vec!["80".to_string()];
+        let f = build_filter(&s).unwrap();
+        assert_eq!(f.src_ports.len(), 1);
+        assert_eq!(f.dst_ports.len(), 1);
+        assert_eq!(f.ports.len(), 1);
+        assert_eq!(f.dst_ports[0].start, 443);
+        assert_eq!(f.dst_ports[0].end, 443);
+    }
+
+    #[test]
+    fn test_build_filter_flow_id_parsed() {
+        let mut s = sort_args();
+        s.flow_id = Some("deadbeef".to_string());
+        let f = build_filter(&s).unwrap();
+        assert_eq!(f.flow_ids.len(), 1);
+    }
+
+    #[test]
+    fn test_build_filter_time_range_parsed() {
+        let mut s = sort_args();
+        s.from = Some("1000".to_string()); // Unix epoch seconds
+        s.to = Some("2000".to_string());
+        let f = build_filter(&s).unwrap();
+        assert_eq!(f.from_ns, Some(1_000 * 1_000_000_000));
+        assert_eq!(f.to_ns, Some(2_000 * 1_000_000_000));
+    }
+
+    #[test]
+    fn test_build_filter_tcp_flags_parsed() {
+        let mut s = sort_args();
+        s.tcp_flags = Some("SYN".to_string());
+        let f = build_filter(&s).unwrap();
+        assert!(f.tcp_flags.is_some());
+    }
+
+    #[test]
+    fn test_build_filter_min_max_len() {
+        let mut s = sort_args();
+        s.min_len = Some(64);
+        s.max_len = Some(1500);
+        let f = build_filter(&s).unwrap();
+        assert_eq!(f.min_len, Some(64));
+        assert_eq!(f.max_len, Some(1500));
+    }
+
+    #[test]
+    fn test_build_filter_negate_and_unidirectional() {
+        let mut s = sort_args();
+        s.negate = true;
+        s.unidirectional = true;
+        let f = build_filter(&s).unwrap();
+        assert!(f.negate);
+        assert!(f.unidirectional);
+    }
+
+    #[test]
+    fn test_build_filter_invalid_proto_returns_error() {
+        let mut s = sort_args();
+        s.proto = Some("notaproto".to_string());
+        assert!(build_filter(&s).is_err());
+    }
+
+    #[test]
+    fn test_build_filter_invalid_ip_returns_error() {
+        let mut s = sort_args();
+        s.src_ip = vec!["not.an.ip".to_string()];
+        assert!(build_filter(&s).is_err());
+    }
+
+    #[test]
+    fn test_build_filter_invalid_port_returns_error() {
+        let mut s = sort_args();
+        s.dst_port = vec!["notaport".to_string()];
+        assert!(build_filter(&s).is_err());
+    }
+
+    #[test]
+    fn test_build_filter_all_arg_types_produce_identical_filter() {
+        let (mut s, mut e, mut r) = (sort_args(), export_args(), replay_args());
+        for x in [&mut s.proto, &mut e.proto, &mut r.proto] {
+            *x = Some("tcp".to_string());
+        }
+        for x in [&mut s.src_ip, &mut e.src_ip, &mut r.src_ip] {
+            *x = vec!["10.0.0.0/8".to_string()];
+        }
+        for x in [&mut s.dst_port, &mut e.dst_port, &mut r.dst_port] {
+            *x = vec!["443".to_string()];
+        }
+        for x in [&mut s.min_len, &mut e.min_len, &mut r.min_len] {
+            *x = Some(64);
+        }
+
+        let fs = build_filter(&s).unwrap();
+        let fe = build_filter(&e).unwrap();
+        let fr = build_filter(&r).unwrap();
+
+        assert_eq!(fs.protocols, fe.protocols);
+        assert_eq!(fs.protocols, fr.protocols);
+        assert_eq!(fs.src_ips.len(), fe.src_ips.len());
+        assert_eq!(fs.src_ips.len(), fr.src_ips.len());
+        assert_eq!(fs.dst_ports[0].start, fe.dst_ports[0].start);
+        assert_eq!(fs.dst_ports[0].start, fr.dst_ports[0].start);
+        assert_eq!(fs.min_len, fe.min_len);
+        assert_eq!(fs.min_len, fr.min_len);
     }
 }
