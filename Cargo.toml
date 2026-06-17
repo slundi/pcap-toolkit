@@ -6,8 +6,12 @@ readme = "README.md"
 license = "Apache-2.0"
 repository = "https://codeberg.org/slundi/pcap-toolkit"
 keywords = ["pcap", "network", "packet", "capture", "forensics"]
-categories = ["command-line-utilities", "network-programming", "parser-implementations"]
-version = "0.1.0"
+categories = [
+    "command-line-utilities",
+    "network-programming",
+    "parser-implementations",
+]
+version = "0.2.0"
 edition = "2024" # requires Rust >= 1.85 (stable as of Feb 2025)
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -37,7 +41,10 @@ base64 = "0.22"
 bpaf = "0.9.26"
 chrono = { version = "0.4.44", features = ["serde"] }
 etherparse = "0.20.1"
-parquet = { version = "53", default-features = false, features = ["zstd", "snap"] }
+parquet = { version = "53", default-features = false, features = [
+    "zstd",
+    "snap",
+] }
 pcap-parser = "0.17.0"
 rapidhash = "4.4.1"
 rayon = "1.12.0"
