@@ -62,7 +62,7 @@ pub fn export_cmd() -> impl Parser<Command> {
         .many();
     let format = long("format")
         .short('F')
-        .help("Override output format: json, parquet, or avro")
+        .help("Override output format: json, parquet, or avro. When multiple --output paths are given, this flag applies only to the first; the rest infer their format from the file extension.")
         .argument::<String>("FMT")
         .optional();
     let compress_payload = long("compress-payload")

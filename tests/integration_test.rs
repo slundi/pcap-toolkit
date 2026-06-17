@@ -4,7 +4,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use pcap_toolkit::bpf;
-use pcap_toolkit::export::{ExportFormat, ExportOptions, export_file};
+use pcap_toolkit::export::{
+    ExportFormat, ExportOptions, MultiExportOptions, OutputTarget, export_file, export_multi,
+};
 use pcap_toolkit::filter::{Filter, FilterRule, IpNet, Op, PortRange};
 use pcap_toolkit::flow::FlowKey;
 use pcap_toolkit::pcap::count_flows_in_file;
@@ -1284,4 +1286,82 @@ fn test_sort_min_flow_packets_excludes_low_count_flows() {
 
     let _ = std::fs::remove_file(&input);
     let _ = std::fs::remove_file(&output);
+}
+
+// ── --format / multi-output fan-out tests (#8) ───────────────────────────────
+
+/// Fan-out export writes each output in the correct format regardless of which
+/// target receives an explicit format and which infers it from its extension.
+/// This exercises the documented behaviour of `--format`: it applies only to
+/// the first `--output`; subsequent outputs resolve their format from their
+/// file extension.
+#[test]
+fn test_export_multi_fanout_writes_correct_formats() {
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0u8; 8]);
+    let pcap_data = build_pcap(&[
+        (1000, 0, frame.clone()),
+        (1001, 0, frame.clone()),
+        (1002, 0, frame),
+    ]);
+    let input = write_tmp_pcap("multi_fanout_in.pcap", &pcap_data);
+    let out_json = std::env::temp_dir().join("multi_fanout_out.jsonl");
+    let out_parquet = std::env::temp_dir().join("multi_fanout_out.parquet");
+
+    let opts = MultiExportOptions {
+        targets: vec![
+            // First target: format supplied explicitly (mirrors --format on the CLI).
+            OutputTarget {
+                path: out_json.clone(),
+                format: Some(ExportFormat::Json),
+                compress_payload: false,
+            },
+            // Second target: format inferred from .parquet extension.
+            OutputTarget {
+                path: out_parquet.clone(),
+                format: None,
+                compress_payload: false,
+            },
+        ],
+        filter: Filter::default(),
+        bpf_filter: None,
+        unidirectional: false,
+    };
+    let report = export_multi(&input, &opts).unwrap();
+
+    assert_eq!(report.outputs.len(), 2);
+    assert_eq!(report.outputs[0].packets_written, 3);
+    assert_eq!(report.outputs[1].packets_written, 3);
+
+    // JSON output: three newline-delimited records.
+    let json_content = std::fs::read_to_string(&out_json).unwrap();
+    assert_eq!(json_content.lines().count(), 3);
+    for line in json_content.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).expect("must be valid JSON");
+        assert!(v["timestamp_ns"].is_number());
+    }
+
+    // Parquet output: magic bytes PAR1 at start and end.
+    let pq_bytes = std::fs::read(&out_parquet).unwrap();
+    assert!(pq_bytes.len() >= 8);
+    assert_eq!(&pq_bytes[..4], b"PAR1");
+    assert_eq!(&pq_bytes[pq_bytes.len() - 4..], b"PAR1");
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&out_json);
+    let _ = std::fs::remove_file(&out_parquet);
+}
+
+/// `ExportFormat::parse` accepts all documented format aliases (case-insensitive).
+#[test]
+fn test_export_format_parse_accepts_all_aliases() {
+    assert_eq!(ExportFormat::parse("json"), Some(ExportFormat::Json));
+    assert_eq!(ExportFormat::parse("JSON"), Some(ExportFormat::Json));
+    assert_eq!(ExportFormat::parse("jsonl"), Some(ExportFormat::Json));
+    assert_eq!(ExportFormat::parse("ndjson"), Some(ExportFormat::Json));
+    assert_eq!(ExportFormat::parse("parquet"), Some(ExportFormat::Parquet));
+    assert_eq!(ExportFormat::parse("PARQUET"), Some(ExportFormat::Parquet));
+    assert_eq!(ExportFormat::parse("avro"), Some(ExportFormat::Avro));
+    assert_eq!(ExportFormat::parse("AVRO"), Some(ExportFormat::Avro));
+    assert_eq!(ExportFormat::parse("csv"), None);
+    assert_eq!(ExportFormat::parse(""), None);
 }
