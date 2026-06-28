@@ -777,6 +777,7 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn meta(
         ts_ns: u64,
         caplen: u32,
@@ -981,9 +982,11 @@ mod tests {
 
     #[test]
     fn test_filter_time_range() {
-        let mut f = Filter::default();
-        f.from_ns = Some(1_000);
-        f.to_ns = Some(2_000);
+        let f = Filter {
+            from_ns: Some(1_000),
+            to_ns: Some(2_000),
+            ..Default::default()
+        };
         assert!(f.matches(&no_flow_meta(1_000, 10)));
         assert!(f.matches(&no_flow_meta(2_000, 10)));
         assert!(!f.matches(&no_flow_meta(999, 10)));
@@ -992,9 +995,11 @@ mod tests {
 
     #[test]
     fn test_filter_packet_length() {
-        let mut f = Filter::default();
-        f.min_len = Some(50);
-        f.max_len = Some(100);
+        let f = Filter {
+            min_len: Some(50),
+            max_len: Some(100),
+            ..Default::default()
+        };
         assert!(f.matches(&no_flow_meta(0, 50)));
         assert!(f.matches(&no_flow_meta(0, 100)));
         assert!(!f.matches(&no_flow_meta(0, 49)));
@@ -1003,8 +1008,10 @@ mod tests {
 
     #[test]
     fn test_filter_protocol_tcp_only() {
-        let mut f = Filter::default();
-        f.protocols = vec![6]; // TCP
+        let f = Filter {
+            protocols: vec![6], // TCP
+            ..Default::default()
+        };
         let tcp = meta(0, 100, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 1234, 80, 6, 0);
         let udp = meta(0, 100, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 1234, 53, 17, 0);
         assert!(f.matches(&tcp));
@@ -1013,8 +1020,10 @@ mod tests {
 
     #[test]
     fn test_filter_protocol_multiple_or() {
-        let mut f = Filter::default();
-        f.protocols = vec![6, 17]; // TCP or UDP
+        let f = Filter {
+            protocols: vec![6, 17], // TCP or UDP
+            ..Default::default()
+        };
         assert!(f.matches(&meta(0, 100, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 1, 2, 6, 0)));
         assert!(f.matches(&meta(0, 100, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 1, 2, 17, 0)));
         assert!(!f.matches(&meta(0, 100, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 0, 0, 1, 0))); // ICMP
@@ -1022,24 +1031,30 @@ mod tests {
 
     #[test]
     fn test_filter_src_ip_cidr() {
-        let mut f = Filter::default();
-        f.src_ips = vec![IpNet::parse("10.0.0.0/8").unwrap()];
+        let f = Filter {
+            src_ips: vec![IpNet::parse("10.0.0.0/8").unwrap()],
+            ..Default::default()
+        };
         assert!(f.matches(&meta(0, 60, v4(10, 1, 2, 3), v4(8, 8, 8, 8), 0, 0, 17, 0)));
         assert!(!f.matches(&meta(0, 60, v4(11, 0, 0, 1), v4(8, 8, 8, 8), 0, 0, 17, 0)));
     }
 
     #[test]
     fn test_filter_dst_ip() {
-        let mut f = Filter::default();
-        f.dst_ips = vec![IpNet::parse("8.8.8.8").unwrap()];
+        let f = Filter {
+            dst_ips: vec![IpNet::parse("8.8.8.8").unwrap()],
+            ..Default::default()
+        };
         assert!(f.matches(&meta(0, 60, v4(1, 2, 3, 4), v4(8, 8, 8, 8), 0, 0, 17, 0)));
         assert!(!f.matches(&meta(0, 60, v4(1, 2, 3, 4), v4(1, 1, 1, 1), 0, 0, 17, 0)));
     }
 
     #[test]
     fn test_filter_ip_either_endpoint() {
-        let mut f = Filter::default();
-        f.ips = vec![IpNet::parse("10.0.0.1").unwrap()];
+        let f = Filter {
+            ips: vec![IpNet::parse("10.0.0.1").unwrap()],
+            ..Default::default()
+        };
         // Matches if src OR dst is 10.0.0.1
         assert!(f.matches(&meta(0, 60, v4(10, 0, 0, 1), v4(8, 8, 8, 8), 0, 0, 17, 0)));
         assert!(f.matches(&meta(0, 60, v4(8, 8, 8, 8), v4(10, 0, 0, 1), 0, 0, 17, 0)));
@@ -1048,11 +1063,13 @@ mod tests {
 
     #[test]
     fn test_filter_src_ip_multiple_or() {
-        let mut f = Filter::default();
-        f.src_ips = vec![
-            IpNet::parse("10.0.0.1").unwrap(),
-            IpNet::parse("192.168.0.0/16").unwrap(),
-        ];
+        let f = Filter {
+            src_ips: vec![
+                IpNet::parse("10.0.0.1").unwrap(),
+                IpNet::parse("192.168.0.0/16").unwrap(),
+            ],
+            ..Default::default()
+        };
         assert!(f.matches(&meta(0, 60, v4(10, 0, 0, 1), v4(8, 8, 8, 8), 0, 0, 6, 0)));
         assert!(f.matches(&meta(0, 60, v4(192, 168, 1, 2), v4(8, 8, 8, 8), 0, 0, 6, 0)));
         assert!(!f.matches(&meta(0, 60, v4(172, 16, 0, 1), v4(8, 8, 8, 8), 0, 0, 6, 0)));
@@ -1060,11 +1077,13 @@ mod tests {
 
     #[test]
     fn test_filter_dst_port() {
-        let mut f = Filter::default();
-        f.dst_ports = vec![PortRange {
-            start: 443,
-            end: 443,
-        }];
+        let f = Filter {
+            dst_ports: vec![PortRange {
+                start: 443,
+                end: 443,
+            }],
+            ..Default::default()
+        };
         assert!(f.matches(&meta(
             0,
             60,
@@ -1080,11 +1099,13 @@ mod tests {
 
     #[test]
     fn test_filter_port_range_either() {
-        let mut f = Filter::default();
-        f.ports = vec![PortRange {
-            start: 8000,
-            end: 9000,
-        }];
+        let f = Filter {
+            ports: vec![PortRange {
+                start: 8000,
+                end: 9000,
+            }],
+            ..Default::default()
+        };
         assert!(f.matches(&meta(
             0,
             60,
@@ -1111,11 +1132,13 @@ mod tests {
     #[test]
     fn test_filter_port_ignored_for_icmp() {
         // Port filters are silently ignored for non-TCP/UDP protocols.
-        let mut f = Filter::default();
-        f.dst_ports = vec![PortRange {
-            start: 443,
-            end: 443,
-        }];
+        let f = Filter {
+            dst_ports: vec![PortRange {
+                start: 443,
+                end: 443,
+            }],
+            ..Default::default()
+        };
         // ICMP packet with dst_port=0: port filter is ignored, but protocol
         // filter is not set, so the only active filter is dst_port which
         // doesn't apply to ICMP → packet should pass.
@@ -1126,8 +1149,10 @@ mod tests {
     fn test_filter_flow_id() {
         let key = FlowKey::new(v4(10, 0, 0, 1), v4(10, 0, 0, 2), 1234, 443, 6);
         let id = key.flow_id(false);
-        let mut f = Filter::default();
-        f.flow_ids = [id].into_iter().collect();
+        let f = Filter {
+            flow_ids: [id].into_iter().collect(),
+            ..Default::default()
+        };
 
         let matching = PacketMeta {
             timestamp_ns: 0,
@@ -1161,8 +1186,10 @@ mod tests {
             .collect();
         let ids: Vec<u64> = keys.iter().map(|k| k.flow_id(false)).collect();
 
-        let mut f = Filter::default();
-        f.flow_ids = ids[..3].iter().copied().collect(); // allow first three
+        let f = Filter {
+            flow_ids: ids[..3].iter().copied().collect(), // allow first three
+            ..Default::default()
+        };
 
         for (i, key) in keys.iter().enumerate() {
             let pkt = PacketMeta {
@@ -1193,8 +1220,10 @@ mod tests {
         // A non-IP packet has no flow key; if flow_ids is non-empty it should
         // not match (there is no ID to look up).
         let key = FlowKey::new(v4(10, 0, 0, 1), v4(10, 0, 0, 2), 1234, 443, 6);
-        let mut f = Filter::default();
-        f.flow_ids = [key.flow_id(false)].into_iter().collect();
+        let f = Filter {
+            flow_ids: [key.flow_id(false)].into_iter().collect(),
+            ..Default::default()
+        };
 
         let no_key = PacketMeta {
             timestamp_ns: 0,
@@ -1207,8 +1236,10 @@ mod tests {
 
     #[test]
     fn test_filter_tcp_flags() {
-        let mut f = Filter::default();
-        f.tcp_flags = Some(TcpFlagsFilter::parse("SYN").unwrap());
+        let f = Filter {
+            tcp_flags: Some(TcpFlagsFilter::parse("SYN").unwrap()),
+            ..Default::default()
+        };
 
         // SYN packet
         assert!(f.matches(&meta(
@@ -1237,13 +1268,15 @@ mod tests {
     #[test]
     fn test_filter_and_composition() {
         // Protocol=TCP AND dst_port=443 AND src_ip=10.0.0.0/8 — all must hold.
-        let mut f = Filter::default();
-        f.protocols = vec![6];
-        f.dst_ports = vec![PortRange {
-            start: 443,
-            end: 443,
-        }];
-        f.src_ips = vec![IpNet::parse("10.0.0.0/8").unwrap()];
+        let f = Filter {
+            protocols: vec![6],
+            dst_ports: vec![PortRange {
+                start: 443,
+                end: 443,
+            }],
+            src_ips: vec![IpNet::parse("10.0.0.0/8").unwrap()],
+            ..Default::default()
+        };
 
         // All match
         assert!(f.matches(&meta(
@@ -1293,15 +1326,19 @@ mod tests {
 
     #[test]
     fn test_filter_non_ip_fails_when_flow_filter_active() {
-        let mut f = Filter::default();
-        f.protocols = vec![6];
+        let f = Filter {
+            protocols: vec![6],
+            ..Default::default()
+        };
         assert!(!f.matches(&no_flow_meta(0, 100)));
     }
 
     #[test]
     fn test_filter_non_ip_passes_when_only_length_filter() {
-        let mut f = Filter::default();
-        f.min_len = Some(50);
+        let f = Filter {
+            min_len: Some(50),
+            ..Default::default()
+        };
         assert!(f.matches(&no_flow_meta(0, 60)));
         assert!(!f.matches(&no_flow_meta(0, 40)));
     }

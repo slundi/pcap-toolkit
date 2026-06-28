@@ -301,8 +301,10 @@ fn test_filter_by_protocol_keeps_udp_only() {
     let input = write_tmp_pcap("filter_proto_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("filter_proto_out.pcap");
 
-    let mut filter = Filter::default();
-    filter.protocols = vec![17]; // UDP only
+    let filter = Filter {
+        protocols: vec![17], // UDP only
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -325,8 +327,10 @@ fn test_filter_by_src_ip_cidr() {
     let input = write_tmp_pcap("filter_srcip_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("filter_srcip_out.pcap");
 
-    let mut filter = Filter::default();
-    filter.src_ips = vec![IpNet::parse("10.0.0.0/8").unwrap()];
+    let filter = Filter {
+        src_ips: vec![IpNet::parse("10.0.0.0/8").unwrap()],
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -350,11 +354,13 @@ fn test_filter_by_dst_port() {
     let input = write_tmp_pcap("filter_dport_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("filter_dport_out.pcap");
 
-    let mut filter = Filter::default();
-    filter.dst_ports = vec![PortRange {
-        start: 443,
-        end: 443,
-    }];
+    let filter = Filter {
+        dst_ports: vec![PortRange {
+            start: 443,
+            end: 443,
+        }],
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -383,9 +389,11 @@ fn test_filter_by_time_range() {
     let input = write_tmp_pcap("filter_time_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("filter_time_out.pcap");
 
-    let mut filter = Filter::default();
-    filter.from_ns = Some(4_000_000_000); // 4s in ns
-    filter.to_ns = Some(6_000_000_000); // 6s in ns
+    let filter = Filter {
+        from_ns: Some(4_000_000_000), // 4s in ns
+        to_ns: Some(6_000_000_000),   // 6s in ns
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -419,8 +427,10 @@ fn test_filter_by_flow_id() {
     let input = write_tmp_pcap("filter_flowid_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("filter_flowid_out.pcap");
 
-    let mut filter = Filter::default();
-    filter.flow_ids = [flow_id].into_iter().collect();
+    let filter = Filter {
+        flow_ids: [flow_id].into_iter().collect(),
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -441,8 +451,10 @@ fn test_filter_empty_output_when_nothing_matches() {
     let input = write_tmp_pcap("filter_none_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("filter_none_out.pcap");
 
-    let mut filter = Filter::default();
-    filter.protocols = vec![6]; // TCP only; all packets are UDP → nothing passes
+    let filter = Filter {
+        protocols: vec![6], // TCP only; all packets are UDP → nothing passes
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -466,9 +478,11 @@ fn test_filter_negate_inverts_result() {
     let input = write_tmp_pcap("filter_negate_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("filter_negate_out.pcap");
 
-    let mut filter = Filter::default();
-    filter.protocols = vec![6]; // TCP only
-    filter.negate = true; // invert: keep non-TCP
+    let filter = Filter {
+        protocols: vec![6], // TCP only
+        negate: true,       // invert: keep non-TCP
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -497,12 +511,15 @@ fn test_filter_or_rule_chain() {
     let input = write_tmp_pcap("filter_or_rule_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("filter_or_rule_out.pcap");
 
-    let mut filter = Filter::default();
-    filter.protocols = vec![6]; // base: TCP only
-    let mut udp_rule = FilterRule::default();
-    udp_rule.op = Op::Or;
-    udp_rule.protocols = vec![17]; // OR UDP
-    filter.rules = vec![udp_rule];
+    let filter = Filter {
+        protocols: vec![6], // base: TCP only
+        rules: vec![FilterRule {
+            op: Op::Or,
+            protocols: vec![17], // OR UDP
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -531,11 +548,14 @@ fn test_filter_not_rule_excludes_subset() {
     let input = write_tmp_pcap("filter_not_rule_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("filter_not_rule_out.pcap");
 
-    let mut filter = Filter::default();
-    let mut exclude_rule = FilterRule::default();
-    exclude_rule.op = Op::Not;
-    exclude_rule.dst_ports = vec![PortRange { start: 80, end: 80 }];
-    filter.rules = vec![exclude_rule];
+    let filter = Filter {
+        rules: vec![FilterRule {
+            op: Op::Not,
+            dst_ports: vec![PortRange { start: 80, end: 80 }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -594,8 +614,10 @@ fn test_bpf_filter_combined_with_structured() {
     let input = write_tmp_pcap("bpf_combined_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("bpf_combined_out.pcap");
 
-    let mut filter = Filter::default();
-    filter.src_ips = vec![IpNet::parse("10.0.0.0/8").unwrap()];
+    let filter = Filter {
+        src_ips: vec![IpNet::parse("10.0.0.0/8").unwrap()],
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -829,8 +851,10 @@ fn test_first_pass_prefilter_reduces_output_count() {
     let input = write_tmp_pcap("prefilter_proto_in.pcap", &pcap_data);
     let output = std::env::temp_dir().join("prefilter_proto_out.pcap");
 
-    let mut filter = Filter::default();
-    filter.protocols = vec![6]; // TCP only
+    let filter = Filter {
+        protocols: vec![6], // TCP only
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -1019,8 +1043,10 @@ fn test_export_json_with_filter() {
     let output = std::env::temp_dir().join("export_json_filter_out.jsonl");
 
     // Keep only TCP packets.
-    let mut filter = Filter::default();
-    filter.protocols = vec![6]; // TCP
+    let filter = Filter {
+        protocols: vec![6], // TCP
+        ..Default::default()
+    };
 
     let opts = ExportOptions {
         output: output.clone(),
@@ -1232,8 +1258,10 @@ fn test_count_flows_respects_filter() {
     ]);
     let input = write_tmp_pcap("count_flows_filter.pcap", &pcap_data);
 
-    let mut filter = Filter::default();
-    filter.protocols = vec![6]; // TCP only
+    let filter = Filter {
+        protocols: vec![6], // TCP only
+        ..Default::default()
+    };
     let counts = count_flows_in_file(&input, &filter, None, true).unwrap();
     // Only the TCP flow should be counted.
     assert_eq!(counts.len(), 1);
@@ -1393,9 +1421,11 @@ fn test_export_min_flow_packets_excludes_small_flows() {
         .collect();
     assert_eq!(qualifying.len(), 1, "only flow A should qualify");
 
-    let mut filter = Filter::default();
-    filter.flow_ids = qualifying;
-    filter.unidirectional = true;
+    let filter = Filter {
+        flow_ids: qualifying,
+        unidirectional: true,
+        ..Default::default()
+    };
 
     let opts = ExportOptions {
         output: output.clone(),
@@ -1439,9 +1469,11 @@ fn test_min_flow_packets_boundary_exactly_n_qualifies() {
         "flow A (count == threshold) must qualify"
     );
 
-    let mut filter = Filter::default();
-    filter.flow_ids = qualifying;
-    filter.unidirectional = true;
+    let filter = Filter {
+        flow_ids: qualifying,
+        unidirectional: true,
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -1478,8 +1510,10 @@ fn test_min_flow_packets_single_flow_all_qualify() {
         .map(|(id, _)| id)
         .collect();
 
-    let mut filter = Filter::default();
-    filter.flow_ids = qualifying;
+    let filter = Filter {
+        flow_ids: qualifying,
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -1537,9 +1571,11 @@ fn test_min_flow_packets_with_multi_file_sort() {
         "only flow A qualifies across both files"
     );
 
-    let mut filter = Filter::default();
-    filter.flow_ids = qualifying;
-    filter.unidirectional = true;
+    let filter = Filter {
+        flow_ids: qualifying,
+        unidirectional: true,
+        ..Default::default()
+    };
 
     let opts = SortOptions {
         output: output.clone(),
@@ -2155,8 +2191,10 @@ fn test_fixture_mixed_bpf_not_tcp_or_udp_keeps_arp() {
 fn test_fixture_mixed_two_tcp_flows() {
     // mixed.pcap has two distinct TCP flows (one to port 443, one to port 80).
     let input = fixture("mixed.pcap");
-    let mut filter = Filter::default();
-    filter.protocols = vec![6]; // TCP only
+    let filter = Filter {
+        protocols: vec![6], // TCP only
+        ..Default::default()
+    };
     let counts = count_flows_in_file(&input, &filter, None, false).unwrap();
     assert_eq!(counts.len(), 2, "mixed.pcap has exactly two TCP flows");
 }
@@ -2187,8 +2225,10 @@ fn test_fixture_mixed_min_flow_packets_threshold() {
     // With threshold=5, only flow 1 qualifies.
     let input = fixture("mixed.pcap");
 
-    let mut tcp_filter = Filter::default();
-    tcp_filter.protocols = vec![6];
+    let tcp_filter = Filter {
+        protocols: vec![6],
+        ..Default::default()
+    };
     let counts = count_flows_in_file(&input, &tcp_filter, None, false).unwrap();
     let qualifying: FxHashSet<u64> = counts
         .into_iter()
@@ -2202,8 +2242,10 @@ fn test_fixture_mixed_min_flow_packets_threshold() {
     );
 
     let output = std::env::temp_dir().join("fx_mixed_minfp.pcap");
-    let mut effective = tcp_filter;
-    effective.flow_ids = qualifying;
+    let effective = Filter {
+        flow_ids: qualifying,
+        ..tcp_filter
+    };
 
     let opts = SortOptions {
         output: output.clone(),
