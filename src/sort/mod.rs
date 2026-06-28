@@ -218,11 +218,10 @@ fn first_pass(
         None => IndexStore::memory(),
     };
 
-    first_pass_inner(&mut reader, store, filter, bpf).map_err(|e| {
+    first_pass_inner(&mut reader, store, filter, bpf).inspect_err(|_| {
         if let Some(p) = &sidecar {
             let _ = std::fs::remove_file(p);
         }
-        e
     })
 }
 
