@@ -42,6 +42,64 @@ const ET_VLAN: u16 = 0x8100;
 const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
 
+// IPv6 extension-header "next header" values that carry their own length field
+// and must be walked to reach the real transport. Excludes ESP (50) — its
+// payload is encrypted and an opaque blob from our perspective.
+const IPV6_EXT_HBH: u8 = 0; // Hop-by-Hop options
+const IPV6_EXT_ROUTING: u8 = 43;
+const IPV6_EXT_FRAGMENT: u8 = 44;
+const IPV6_EXT_AH: u8 = 51; // Authentication Header (length unit differs)
+const IPV6_EXT_DEST: u8 = 60; // Destination options
+const IPV6_EXT_MOBILITY: u8 = 135;
+const IPV6_EXT_HIP: u8 = 139;
+const IPV6_EXT_SHIM6: u8 = 140;
+
+/// Walk the IPv6 extension-header chain.
+///
+/// Starting at the fixed header's next-header byte (`data[ip_off + 6]`),
+/// traverse extension headers until a non-extension protocol is reached.
+///
+/// Returns `Some((final_proto, transport_start))` where `transport_start` is
+/// the byte offset of the first non-extension protocol header, or `None` if
+/// the chain is malformed or runs off the end of the buffer.
+///
+/// Caller must have already verified that `data.len() >= ip_off + 40`.
+fn walk_ipv6_extension_headers(data: &[u8], ip_off: usize) -> Option<(u8, usize)> {
+    debug_assert!(data.len() >= ip_off + 40);
+    let mut next = data[ip_off + 6];
+    let mut off = ip_off + 40;
+    // Bound the loop — pathological/looping chains should not block forever.
+    for _ in 0..16 {
+        let hdr_len = match next {
+            IPV6_EXT_HBH | IPV6_EXT_ROUTING | IPV6_EXT_DEST | IPV6_EXT_MOBILITY | IPV6_EXT_HIP
+            | IPV6_EXT_SHIM6 => {
+                // Length is "header extension length" in 8-byte units, not
+                // counting the first 8 bytes.
+                if data.len() < off + 2 {
+                    return None;
+                }
+                8 + (data[off + 1] as usize) * 8
+            }
+            IPV6_EXT_FRAGMENT => 8, // fixed-size 8-byte header
+            IPV6_EXT_AH => {
+                // AH "Payload Len" field is in 4-byte units, not counting the
+                // first 8 bytes (so total = (len + 2) * 4).
+                if data.len() < off + 2 {
+                    return None;
+                }
+                (data[off + 1] as usize + 2) * 4
+            }
+            _ => return Some((next, off)),
+        };
+        if data.len() < off + hdr_len {
+            return None;
+        }
+        next = data[off];
+        off += hdr_len;
+    }
+    None
+}
+
 // ── Public types ─────────────────────────────────────────────────────────────
 
 /// Errors produced during transform option parsing.
@@ -192,7 +250,9 @@ fn detect_protocol(data: &[u8]) -> Option<u8> {
         }
         ET_IPV6 => {
             if data.len() >= ip_off + 40 {
-                Some(data[ip_off + 6])
+                // Walk extension headers so per-protocol truncation rules fire
+                // on the real transport protocol, not the first ext-header.
+                walk_ipv6_extension_headers(data, ip_off).map(|(proto, _)| proto)
             } else {
                 None
             }
@@ -422,7 +482,13 @@ fn reframe_ipv6_to_ipv4(data: &[u8], ip_off: usize, mappings: &[IpMapping]) -> O
     }
 
     let hop_limit = data[ip_off + 7]; // → TTL
-    let proto = data[ip_off + 6]; // next header → protocol
+    // Refuse to reframe packets carrying IPv6 extension headers — they have
+    // no direct IPv4 equivalent and copying the bytes verbatim would mismatch
+    // the rewritten `protocol` field.
+    let (proto, transport_start) = walk_ipv6_extension_headers(data, ip_off)?;
+    if transport_start != ip_off + 40 {
+        return None;
+    }
     let src_v6 = Ipv6Addr::from(<[u8; 16]>::try_from(&data[ip_off + 8..ip_off + 24]).ok()?);
     let dst_v6 = Ipv6Addr::from(<[u8; 16]>::try_from(&data[ip_off + 24..ip_off + 40]).ok()?);
 
@@ -557,8 +623,11 @@ fn do_truncate(data: &mut Vec<u8>, max_bytes: u32, origlen: u32) -> (u32, bool) 
             if data.len() < ip_off + 40 {
                 return (origlen, false);
             }
-            let proto = data[ip_off + 6]; // next header
-            let ts = ip_off + 40;
+            // Walk extension headers to find the real transport. Bail on
+            // unparsable chains rather than truncating into ext-header bytes.
+            let Some((proto, ts)) = walk_ipv6_extension_headers(data, ip_off) else {
+                return (origlen, false);
+            };
             let th = match proto {
                 PROTO_TCP => {
                     if data.len() < ts + 20 {
@@ -660,8 +729,11 @@ fn recalc_ipv6(data: &mut [u8], ip_off: usize) {
     if data.len() < ip_off + 40 {
         return;
     }
-    let proto = data[ip_off + 6]; // next header
-    let ts = ip_off + 40;
+    // Walk past any extension headers; the pseudo-header for the L4 checksum
+    // uses the *upper-layer* protocol, not the first ext-header value.
+    let Some((proto, ts)) = walk_ipv6_extension_headers(data, ip_off) else {
+        return;
+    };
     if proto == PROTO_TCP || proto == PROTO_UDP {
         recalc_transport_v6(data, ip_off, ts, proto);
     }
@@ -1543,5 +1615,100 @@ mod tests {
         apply(&mut data, 0, 0, orig, &opts);
         // Ethernet(14) + IPv4(20) + TCP(20) + 10 = 64
         assert_eq!(data.len(), 64);
+    }
+
+    // ── IPv6 extension-header handling ────────────────────────────────────────
+
+    /// Build an IPv6/UDP frame with one Hop-by-Hop extension header in front.
+    fn eth_ipv6_hbh_udp(src: [u8; 16], dst: [u8; 16], payload: &[u8]) -> Vec<u8> {
+        // HBH header: next=UDP(17), hdr_ext_len=0 (→ 8 bytes total), 6 bytes of
+        // padding (PadN option type 0x01 with len 4 + 4 pad bytes).
+        let hbh = [17u8, 0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00];
+        let udp_len = (8 + payload.len()) as u16;
+        let payload_len = (hbh.len() as u16) + udp_len;
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0xFF; 6]);
+        f.extend_from_slice(&[0x00; 6]);
+        f.extend_from_slice(&[0x86, 0xDD]);
+        f.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+        f.extend_from_slice(&payload_len.to_be_bytes());
+        f.push(0); // next header = HBH
+        f.push(64);
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&hbh);
+        f.extend_from_slice(&100u16.to_be_bytes()); // src port
+        f.extend_from_slice(&200u16.to_be_bytes()); // dst port
+        f.extend_from_slice(&udp_len.to_be_bytes());
+        f.extend_from_slice(&[0x00, 0x00]); // checksum (recomputed by transform)
+        f.extend_from_slice(payload);
+        f
+    }
+
+    #[test]
+    fn test_walk_ipv6_no_extensions() {
+        let frame = eth_ipv6_udp([1; 16], [2; 16], 1, 2, b"hi");
+        let (proto, ts) = walk_ipv6_extension_headers(&frame, 14).unwrap();
+        assert_eq!(proto, PROTO_UDP);
+        assert_eq!(ts, 14 + 40);
+    }
+
+    #[test]
+    fn test_walk_ipv6_skips_hbh() {
+        let frame = eth_ipv6_hbh_udp([1; 16], [2; 16], b"hi");
+        let (proto, ts) = walk_ipv6_extension_headers(&frame, 14).unwrap();
+        assert_eq!(proto, PROTO_UDP);
+        // HBH is 8 bytes long → transport starts 8 bytes past the fixed header.
+        assert_eq!(ts, 14 + 40 + 8);
+    }
+
+    #[test]
+    fn test_walk_ipv6_truncated_ext_header_errors() {
+        // Fixed header says next=HBH but the buffer ends right after it.
+        let mut frame = eth_ipv6_udp([1; 16], [2; 16], 1, 2, b"x");
+        frame[14 + 6] = 0; // next header = HBH
+        frame.truncate(14 + 40 + 1); // truncate inside the HBH header
+        assert!(walk_ipv6_extension_headers(&frame, 14).is_none());
+    }
+
+    #[test]
+    fn test_truncation_with_ipv6_ext_header_preserves_transport() {
+        // Bug regression: previously the next-header byte (0 = HBH) was
+        // treated as TCP/UDP, causing truncate_payload to bail OR worse,
+        // splice into the HBH bytes. With the walker, truncation correctly
+        // identifies UDP and trims only the payload.
+        let payload = vec![0xAA; 200];
+        let mut data = eth_ipv6_hbh_udp([1; 16], [2; 16], &payload);
+        let origlen = data.len() as u32;
+        // truncate_payload is private; exercise it through `apply`.
+        let opts = TransformOptions {
+            max_payload_bytes: Some(10),
+            ..Default::default()
+        };
+        let original_hbh = data[14 + 40..14 + 48].to_vec();
+        apply(&mut data, 0, 0, origlen, &opts);
+        // Ethernet(14) + IPv6(40) + HBH(8) + UDP(8) + 10 = 80
+        assert_eq!(data.len(), 80);
+        // HBH header bytes must be preserved verbatim.
+        assert_eq!(&data[14 + 40..14 + 48], &original_hbh[..]);
+        // UDP destination port must still be 200.
+        let dport = u16::from_be_bytes([data[14 + 48 + 2], data[14 + 48 + 3]]);
+        assert_eq!(dport, 200);
+    }
+
+    #[test]
+    fn test_reframe_v6_to_v4_refuses_packets_with_ext_headers() {
+        // Cross-family reframe must not copy ext-header bytes verbatim into
+        // an IPv4 packet — the rewritten `protocol` field would be wrong.
+        let src_v6 = [0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
+        let dst_v6 = [0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02];
+        let mut data = eth_ipv6_hbh_udp(src_v6, dst_v6, b"hi");
+        let mapping = parse_ip_mapping("fe80::1=10.0.0.1").unwrap();
+        let mapping2 = parse_ip_mapping("fe80::2=10.0.0.2").unwrap();
+        let before = data.clone();
+        let _ = apply_ip_map(&mut data, &[mapping, mapping2]);
+        // Bytes must be unchanged: reframe is refused, so apply_ip_map should
+        // leave the packet as-is (cross-family path only succeeds via reframe).
+        assert_eq!(data, before);
     }
 }

@@ -105,4 +105,7 @@ pub enum SortError {
         first: i32,
         found: i32,
     },
+
+    #[error("packet caplen {caplen} exceeds the {max}-byte sanity limit (corrupt index?)")]
+    CaplenTooLarge { caplen: u32, max: u32 },
 }

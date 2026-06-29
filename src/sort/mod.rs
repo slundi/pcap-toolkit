@@ -151,7 +151,9 @@ pub fn sort_files(inputs: &[&Path], opts: &SortOptions) -> Result<SortReport, So
         }
     }
 
-    merged.sort_unstable_by_key(|e| e.entry.timestamp_ns);
+    // Stable sort with tie-break on (file_id, byte_offset) so packets with
+    // identical timestamps keep their original capture order.
+    merged.sort_by_key(|e| (e.entry.timestamp_ns, e.file_id, e.entry.byte_offset));
 
     second_pass_multi(inputs, reference_hdr, &merged, opts)
 }
