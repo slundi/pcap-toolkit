@@ -181,7 +181,7 @@ pub enum BpfExpr {
     Host { dir: Dir, net: IpNet },
     /// Network prefix (CIDR) match on one or both endpoints.
     Net { dir: Dir, net: IpNet },
-    /// Port or port-range match (TCP/UDP only; silently passes other protocols).
+    /// Port or port-range match. Non-TCP/UDP packets never match.
     Port { dir: Dir, range: PortRange },
     /// Captured-length comparison (`len > N`, `len <= N`, …).
     Len { op: CmpOp, val: u32 },
@@ -563,9 +563,10 @@ impl BpfExpr {
                 let Some(k) = &meta.flow_key else {
                     return false;
                 };
-                // Port filters are silently ignored for non-TCP/UDP protocols.
+                // Port filters apply only to TCP/UDP — match tcpdump, which
+                // rejects everything else (e.g. ICMP, SCTP) under `port N`.
                 if !matches!(k.protocol, 6 | 17) {
-                    return true;
+                    return false;
                 }
                 match dir {
                     Dir::Src => range.contains(k.src_port),
@@ -887,6 +888,36 @@ mod tests {
         assert!(expr.eval(&make_meta(60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 8080, 80, 6)));
         // both low — no match
         assert!(!expr.eval(&make_meta(60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 80, 80, 6)));
+    }
+
+    #[test]
+    fn test_eval_port_rejects_non_tcp_udp() {
+        // Bare `port N` must NOT match non-TCP/UDP traffic (matches tcpdump).
+        // Previously this silently returned true, letting ICMP through any
+        // `port` predicate.
+        let expr = parse("port 443").unwrap();
+        // ICMP (proto 1) — ports are not meaningful
+        assert!(!expr.eval(&make_meta(60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 0, 0, 1)));
+        // SCTP (proto 132) — port field would exist but tcpdump rejects it
+        assert!(!expr.eval(&make_meta(
+            60,
+            v4(1, 1, 1, 1),
+            v4(2, 2, 2, 2),
+            443,
+            443,
+            132
+        )));
+        // TCP still matches
+        assert!(expr.eval(&make_meta(60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 5000, 443, 6)));
+        // UDP still matches
+        assert!(expr.eval(&make_meta(
+            60,
+            v4(1, 1, 1, 1),
+            v4(2, 2, 2, 2),
+            5000,
+            443,
+            17
+        )));
     }
 
     #[test]
