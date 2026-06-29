@@ -12,7 +12,8 @@ categories = [
     "parser-implementations",
 ]
 version = "0.2.0"
-edition = "2024" # requires Rust >= 1.85 (stable as of Feb 2025)
+edition = "2024"
+rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -39,7 +40,7 @@ anyhow = "1.0.102"
 apache-avro = { version = "0.21", features = ["zstandard"] }
 base64 = "0.22"
 bpaf = "0.9.26"
-chrono = { version = "0.4.44", features = ["serde"] }
+chrono = "0.4.44"
 etherparse = "0.20.1"
 parquet = { version = "53", default-features = false, features = [
     "zstd",
@@ -88,11 +89,11 @@ opt-level = 3     # Max optimizations
 lto = "fat"       # Link Time Optimization (smaller, faster binary)
 codegen-units = 1 # Better optimizations at the cost of compile time
 panic = "abort"   # Removes stack unwinding (smaller binary size)
-strip = true      # Automatically strips symbols/debug info (like 'strip' command)
+strip = "debuginfo" # Strip debug info but keep symbols so addr2line works on crash reports — useful for a forensic tool
 
 # Profile for Benchmarking
 [profile.bench]
-extend = "release"
+inherits = "release"
 debug = false
 
 # --- Features ---
@@ -104,7 +105,7 @@ debug = false
 # Run `cargo dist init` to generate full CI integration.
 # This project uses its own release workflow (.github/workflows/release.yaml);
 # set dist = true here only if you want cargo-dist to manage releases instead.
-[workspace.metadata.dist]
+[package.metadata.dist]
 dist = false
 targets = [
     "x86_64-unknown-linux-gnu",
