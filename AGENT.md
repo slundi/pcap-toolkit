@@ -24,7 +24,7 @@
 ├── docs/                # Project documentation (Roadmap.md, CLI.md, Nix.md)
 ├── .cargo/config.toml   # Cargo aliases and linker config (mold)
 ├── .forgejo/            # Issue/PR templates for Codeberg
-├── .github/workflows/   # Forgejo Actions: CI (rust.yaml), release (release.yaml), audit
+├── .github/workflows/   # GitHub Actions: CI (rust.yaml), release (release.yaml), audit, cross_compile
 ├── .woodpecker.yml      # Woodpecker CI (mirrors Forgejo Actions CI jobs)
 ├── Cargo.toml           # Package manifest — dependencies, profiles, metadata
 ├── deny.toml            # cargo-deny: licence, advisory, and ban rules
