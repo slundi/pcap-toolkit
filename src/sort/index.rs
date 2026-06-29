@@ -70,6 +70,46 @@ pub struct FilePacketIndex {
 
 // ── IndexStore ───────────────────────────────────────────────────────────────
 
+/// RAII handle for an on-disk sidecar file.
+///
+/// Removes the file on drop unless [`disarm`](Self::disarm) is called. This
+/// guarantees cleanup on every exit path — including panics, `?` early
+/// returns, and signal-induced unwinding — so a half-finished sort no longer
+/// leaks gigabytes of `.idx` files.
+pub struct SidecarGuard {
+    path: Option<PathBuf>,
+}
+
+impl SidecarGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// Borrow the path of the file being guarded.
+    ///
+    /// # Panics
+    /// Panics if the guard has been disarmed.
+    pub fn path(&self) -> &Path {
+        self.path
+            .as_deref()
+            .expect("SidecarGuard accessed after disarm")
+    }
+
+    /// Disarm the guard so the file is *not* removed on drop and return the
+    /// owned path. Useful when caller code wants to keep the sidecar around.
+    pub fn disarm(mut self) -> PathBuf {
+        self.path.take().expect("SidecarGuard already disarmed")
+    }
+}
+
+impl Drop for SidecarGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// Storage backend for the first-pass packet index.
 pub enum IndexStore {
     /// In-memory vector — fast path for captures that fit comfortably in RAM.
@@ -78,7 +118,7 @@ pub enum IndexStore {
     /// large (≈ 20 MB per 1 M packets).
     Disk {
         writer: BufWriter<File>,
-        path: PathBuf,
+        guard: SidecarGuard,
         count: u64,
     },
 }
@@ -91,13 +131,16 @@ impl IndexStore {
 
     /// Create an on-disk store backed by a file at `sidecar_path`.
     ///
+    /// The returned store owns a [`SidecarGuard`] that deletes the file when
+    /// the store is dropped, regardless of whether the sort completes cleanly.
+    ///
     /// # Errors
     /// Returns [`SortError::Io`] if the sidecar file cannot be created.
     pub fn disk(sidecar_path: &Path) -> Result<Self, SortError> {
         let file = File::create(sidecar_path)?;
         Ok(IndexStore::Disk {
             writer: BufWriter::with_capacity(64 * 1024, file),
-            path: sidecar_path.to_owned(),
+            guard: SidecarGuard::new(sidecar_path.to_owned()),
             count: 0,
         })
     }
@@ -123,7 +166,7 @@ impl IndexStore {
     /// Return the path of the on-disk sidecar file, if any.
     pub fn sidecar_path(&self) -> Option<&Path> {
         match self {
-            IndexStore::Disk { path, .. } => Some(path),
+            IndexStore::Disk { guard, .. } => Some(guard.path()),
             IndexStore::Memory(_) => None,
         }
     }
@@ -146,13 +189,15 @@ impl IndexStore {
             }
             IndexStore::Disk {
                 mut writer,
-                path,
+                guard,
                 count,
             } => {
                 writer.flush()?;
                 drop(writer);
-                let mut entries = read_disk_index(&path, count)?;
+                let mut entries = read_disk_index(guard.path(), count)?;
                 entries.sort_by_key(|e| (e.timestamp_ns, e.byte_offset));
+                // `guard` is dropped at end of scope, removing the sidecar.
+                drop(guard);
                 Ok(entries)
             }
         }
@@ -273,6 +318,8 @@ mod tests {
     #[test]
     fn test_disk_store_roundtrip() {
         let path = std::env::temp_dir().join("pcap_toolkit_test_index.idx");
+        // Defensive: ensure no stale file from a previous run.
+        let _ = std::fs::remove_file(&path);
         let mut store = IndexStore::disk(&path).unwrap();
         for (ts, off) in [(300u64, 30u64), (100, 10), (200, 20)] {
             store
@@ -287,6 +334,51 @@ mod tests {
         assert_eq!(
             sorted.iter().map(|e| e.timestamp_ns).collect::<Vec<_>>(),
             [100, 200, 300]
+        );
+        // SidecarGuard drops with the store at end of into_sorted — the
+        // sidecar file must no longer exist.
+        assert!(
+            !path.exists(),
+            "sidecar should be auto-removed by SidecarGuard"
+        );
+    }
+
+    #[test]
+    fn test_sidecar_guard_removes_file_on_drop() {
+        // Simulate abnormal termination: push some records, then drop the
+        // store without calling into_sorted(). The .idx file must be gone.
+        let path = std::env::temp_dir().join("pcap_toolkit_test_drop_cleanup.idx");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = IndexStore::disk(&path).unwrap();
+            store
+                .push(PacketIndex {
+                    timestamp_ns: 1,
+                    byte_offset: 0,
+                    caplen: 1,
+                })
+                .unwrap();
+            assert!(path.exists(), "sidecar must exist while store is live");
+            // store goes out of scope here — SidecarGuard::drop fires.
+        }
+        assert!(
+            !path.exists(),
+            "sidecar must be removed on store drop (abnormal-termination guard)"
+        );
+    }
+
+    #[test]
+    fn test_sidecar_guard_disarm_keeps_file() {
+        // Disarming the guard transfers cleanup responsibility to the caller.
+        let path = std::env::temp_dir().join("pcap_toolkit_test_disarm.idx");
+        let _ = std::fs::remove_file(&path);
+        let guard = SidecarGuard::new(path.clone());
+        std::fs::write(&path, b"x").unwrap();
+        let returned = guard.disarm();
+        assert_eq!(returned, path);
+        assert!(
+            path.exists(),
+            "disarmed guard must not remove the file on drop"
         );
         let _ = std::fs::remove_file(&path);
     }
