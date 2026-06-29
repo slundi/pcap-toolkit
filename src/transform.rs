@@ -436,7 +436,14 @@ fn reframe_ipv4_to_ipv6(data: &[u8], ip_off: usize, mappings: &[IpMapping]) -> O
     if data.len() < ip_off + 20 {
         return None;
     }
-    let ihl = ((data[ip_off] & 0x0F) * 4) as usize;
+    // Raw IHL field is the header length in 32-bit words. Minimum legal value
+    // is 5 (= 20 bytes); anything less is malformed and would cause us to
+    // misread "transport" bytes from inside the IP header.
+    let raw_ihl = data[ip_off] & 0x0F;
+    if raw_ihl < 5 {
+        return None;
+    }
+    let ihl = (raw_ihl as usize) * 4;
     if data.len() < ip_off + ihl {
         return None;
     }
@@ -450,7 +457,8 @@ fn reframe_ipv4_to_ipv6(data: &[u8], ip_off: usize, mappings: &[IpMapping]) -> O
     let dst_v6 = resolve_ipv4_to_ipv6(dst_v4, mappings);
 
     let transport = &data[ip_off + ihl..];
-    let payload_len = transport.len() as u16;
+    // IPv6 payload length is a 16-bit field; refuse to silently wrap.
+    let payload_len: u16 = transport.len().try_into().ok()?;
 
     let mut out = Vec::with_capacity(ip_off + 40 + transport.len());
     write_ethernet_preamble(&mut out, data, ip_off, ET_IPV6);
@@ -497,7 +505,11 @@ fn reframe_ipv6_to_ipv4(data: &[u8], ip_off: usize, mappings: &[IpMapping]) -> O
     let dst_v4 = resolve_ipv6_to_ipv4(dst_v6, mappings)?;
 
     let transport = &data[ip_off + 40..];
-    let ip_total = (20u16).saturating_add(transport.len() as u16);
+    // IPv4 total-length is a 16-bit field; bail if the rewritten packet
+    // would overflow rather than producing a silently-wrapped header.
+    let ip_total: u16 = (20usize)
+        .checked_add(transport.len())
+        .and_then(|n| n.try_into().ok())?;
 
     let mut out = Vec::with_capacity(ip_off + 20 + transport.len());
     write_ethernet_preamble(&mut out, data, ip_off, ET_IPV4);
@@ -648,7 +660,20 @@ fn do_truncate(data: &mut Vec<u8>, max_bytes: u32, origlen: u32) -> (u32, bool) 
     };
 
     let payload_start = transport_start + transport_hdr_len;
-    let max_total = payload_start + max_bytes as usize;
+    // Cap max_total so every length field we have to rewrite still fits in
+    // its 16-bit slot. Without this, a large `max_bytes` could produce
+    // ip_total / payload_len / udp_len wraparounds and a malformed packet.
+    let len_ceiling = if et == ET_IPV4 {
+        ip_off + u16::MAX as usize // IP total length
+    } else {
+        ip_off + 40 + u16::MAX as usize // IPv6 payload length
+    };
+    let mut max_total = payload_start.saturating_add(max_bytes as usize);
+    max_total = max_total.min(len_ceiling);
+    if proto == PROTO_UDP {
+        // UDP length field is also u16, including the 8-byte header.
+        max_total = max_total.min(transport_start + u16::MAX as usize);
+    }
 
     if data.len() <= max_total {
         return (origlen, false); // already short enough
@@ -657,7 +682,8 @@ fn do_truncate(data: &mut Vec<u8>, max_bytes: u32, origlen: u32) -> (u32, bool) 
     data.truncate(max_total);
     let new_len = data.len();
 
-    // Update IP total length / payload length.
+    // Update IP total length / payload length. Casts are safe because of the
+    // ceiling clamp above.
     if et == ET_IPV4 {
         let new_ip_total = (new_len - ip_off) as u16;
         data[ip_off + 2..ip_off + 4].copy_from_slice(&new_ip_total.to_be_bytes());
@@ -1694,6 +1720,41 @@ mod tests {
         // UDP destination port must still be 200.
         let dport = u16::from_be_bytes([data[14 + 48 + 2], data[14 + 48 + 3]]);
         assert_eq!(dport, 200);
+    }
+
+    #[test]
+    fn test_reframe_v4_to_v6_rejects_malformed_ihl() {
+        // Build a valid v4/UDP frame then poke an invalid IHL (= 4 → 16 bytes,
+        // less than the minimum 20). The reframe must refuse rather than
+        // slicing transport bytes from inside the IP header.
+        let mut data = eth_ipv4_udp([10, 0, 0, 1], [10, 0, 0, 2], 100, 200, b"x");
+        data[14] = 0x44; // version=4, IHL=4 (illegal)
+        let mapping = parse_ip_mapping("10.0.0.1=::1").unwrap();
+        let mapping2 = parse_ip_mapping("10.0.0.2=::2").unwrap();
+        let before = data.clone();
+        let _ = apply_ip_map(&mut data, &[mapping, mapping2]);
+        // Reframe refused → packet bytes unchanged.
+        assert_eq!(data, before);
+    }
+
+    #[test]
+    fn test_truncate_caps_max_bytes_at_ipv4_total_length() {
+        // Passing a huge max_payload_bytes must not silently wrap the
+        // IPv4 total-length u16. The truncator should clamp to the field's
+        // maximum (65535 minus the headers).
+        let payload = vec![0xAA; 100_000];
+        let mut data = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 200, &payload);
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            max_payload_bytes: Some(80_000), // larger than u16::MAX
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, origlen, &opts);
+        // Read back the IP total-length field — must equal data.len() - 14.
+        let ip_total = u16::from_be_bytes([data[16], data[17]]);
+        assert_eq!(ip_total as usize, data.len() - 14);
+        // Sanity: data must have been truncated to <= ETH(14) + 65535.
+        assert!(data.len() <= 14 + u16::MAX as usize);
     }
 
     #[test]
