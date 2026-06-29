@@ -28,11 +28,29 @@ use crate::pcap;
 // ── Public types ─────────────────────────────────────────────────────────────
 
 /// How to pace packet transmission during replay.
+///
+/// # Sorted input expected
+///
+/// [`RealTime`](Self::RealTime) and [`Multiplier`](Self::Multiplier) anchor
+/// their wall-clock schedule on the first packet's timestamp. Packets whose
+/// timestamp is *earlier* than the first packet's are sent immediately (the
+/// computed delay saturates to zero). For deterministic timing, the input
+/// PCAP should be sorted ascending by capture timestamp — run [`sort_file`]
+/// first if you don't trust the source. [`Max`](Self::Max) and
+/// [`Pps`](Self::Pps) ignore packet timestamps entirely and are unaffected.
+///
+/// [`sort_file`]: crate::sort::sort_file
 #[derive(Debug, Clone)]
 pub enum ReplaySpeed {
     /// Honour original inter-packet timing (the default).
+    ///
+    /// Requires a sorted PCAP for deterministic pacing; see the enum-level
+    /// docs above.
     RealTime,
     /// Scale timing by a multiplier: `>1.0` = faster, `<1.0` = slower.
+    ///
+    /// Requires a sorted PCAP for deterministic pacing; see the enum-level
+    /// docs above.
     Multiplier(f64),
     /// Send as fast as possible with no delay between packets.
     Max,
@@ -185,11 +203,31 @@ mod platform {
         sll_addr: [u8; 8],
     }
 
+    /// Validate that `iface` is a plausible Linux interface name.
+    ///
+    /// Linux interface names are at most 15 bytes (`IFNAMSIZ - 1`) and in
+    /// practice are limited to ASCII letters, digits, and a small set of
+    /// punctuation. We reject anything outside `[A-Za-z0-9._-]` and disallow
+    /// empty names, which also defends against path-traversal sequences like
+    /// `../` being interpolated into the sysfs path below.
+    pub(super) fn validate_iface_name(iface: &str) -> Result<(), ReplayError> {
+        if iface.is_empty()
+            || iface.len() > 15
+            || !iface
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            return Err(ReplayError::InvalidInterface(iface.to_owned()));
+        }
+        Ok(())
+    }
+
     /// Read the interface index from `/sys/class/net/<iface>/ifindex`.
     ///
     /// This avoids a `libc` dependency while remaining reliable on any
     /// Linux system (the sysfs entry is always present for real interfaces).
     fn read_ifindex(iface: &str) -> Result<i32, ReplayError> {
+        validate_iface_name(iface)?;
         let path = format!("/sys/class/net/{iface}/ifindex");
         let s = std::fs::read_to_string(&path)
             .map_err(|_| ReplayError::UnknownInterface(iface.to_owned()))?;
@@ -451,6 +489,38 @@ mod tests {
         // Packet 1 at 1 000 pps: target = 1 ms, but 10 s have elapsed.
         let d = compute_delay(&ReplaySpeed::Pps(1_000), 0, &mut first_ts, 1, &start);
         assert_eq!(d, Duration::ZERO);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_validate_iface_name_accepts_normal_names() {
+        use super::platform::validate_iface_name;
+        for ok in ["eth0", "wlp3s0", "lo", "en-1", "br_lan.10", "veth0"] {
+            assert!(validate_iface_name(ok).is_ok(), "should accept {ok:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_validate_iface_name_rejects_path_traversal_and_junk() {
+        use super::platform::validate_iface_name;
+        for bad in [
+            "",                      // empty
+            "../../etc/passwd",      // path-traversal
+            "eth0/foo",              // slash
+            "eth 0",                 // space
+            "a".repeat(16).as_str(), // > IFNAMSIZ-1
+            "wlan\n",                // newline
+            "eth0\0",                // NUL
+        ] {
+            assert!(
+                matches!(
+                    validate_iface_name(bad),
+                    Err(ReplayError::InvalidInterface(_))
+                ),
+                "should reject {bad:?}"
+            );
+        }
     }
 
     /// On Linux: verify that a nonexistent interface produces the right error.
