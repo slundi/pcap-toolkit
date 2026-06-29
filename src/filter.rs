@@ -241,8 +241,7 @@ impl TcpFlagsFilter {
     /// Return `true` if `flags` satisfies this filter.
     pub fn matches(self, flags: u8) -> bool {
         if self.exact {
-            // All specified flags must be set and no other flags may be set.
-            flags == self.value
+            (flags & self.mask) == self.value
         } else {
             (flags & self.mask) != 0
         }
@@ -889,10 +888,24 @@ mod tests {
 
     #[test]
     fn test_tcp_flags_syn_ack_exact() {
+        // Exact mode: `(flags & mask) == value` — both SYN and ACK bits must
+        // be set; bits outside the mask are ignored.
         let f = TcpFlagsFilter::parse("SYN+ACK:exact").unwrap();
-        assert!(f.matches(0x12)); // SYN+ACK exactly
-        assert!(!f.matches(0x02)); // SYN only
-        assert!(!f.matches(0x13)); // SYN+ACK+FIN
+        assert!(f.matches(0x12)); // SYN+ACK
+        assert!(f.matches(0x13)); // SYN+ACK+FIN — FIN is outside the mask, still matches
+        assert!(f.matches(0x1A)); // SYN+ACK+PSH
+        assert!(!f.matches(0x02)); // SYN only — ACK bit missing
+        assert!(!f.matches(0x10)); // ACK only — SYN bit missing
+        assert!(!f.matches(0x00)); // no flags
+    }
+
+    #[test]
+    fn test_tcp_flags_syn_exact_alone() {
+        // SYN:exact requires the SYN bit to be set; other bits are ignored.
+        let f = TcpFlagsFilter::parse("SYN:exact").unwrap();
+        assert!(f.matches(0x02)); // SYN
+        assert!(f.matches(0x12)); // SYN+ACK
+        assert!(!f.matches(0x10)); // ACK only
     }
 
     #[test]
