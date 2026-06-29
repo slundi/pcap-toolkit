@@ -63,6 +63,59 @@ bash install.sh --user
 | macOS | `x86_64`, `arm64` (Apple Silicon) | `.tar.gz` |
 | Windows | `x86_64` | `.zip` (run via MSYS, Cygwin, Git Bash, or WSL) |
 
+## Docker (CI / data pipelines)
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published on every
+release tag. The image is built `FROM gcr.io/distroless/static-debian12`
+with no shell, no package manager, and runs as a non-root user — the
+compressed image is around 10 MB.
+
+**Recommended registry — GHCR** (no anonymous pull rate limits):
+
+```sh
+docker pull ghcr.io/slundi/pcap-toolkit:latest
+docker run --rm -v "$PWD:/data" ghcr.io/slundi/pcap-toolkit:latest info /data/traffic.pcap
+```
+
+**Docker Hub mirror** (subject to anonymous pull rate limits — fine for
+desktop use, less so for shared CI runners):
+
+```sh
+docker pull slundi/pcap-toolkit:latest
+```
+
+### Tag scheme
+
+| Tag | Updates on |
+|------|-----------|
+| `vX.Y.Z` | Pinned to one release. Use this in CI. |
+| `X.Y.Z`, `X.Y`, `X` | Floating semver tags. |
+| `latest` | Most recent release. Avoid in CI. |
+
+### Live replay from Docker
+
+The default user is non-root, so `replay` (which needs `CAP_NET_RAW` on a
+host interface) requires `--cap-add=NET_RAW --user 0 --network host`:
+
+```sh
+docker run --rm --cap-add=NET_RAW --user 0 --network host \
+  -v "$PWD:/data" ghcr.io/slundi/pcap-toolkit:latest \
+  replay --interface eth0 /data/traffic.pcap
+```
+
+For pure parse / filter / export workloads no extra flags are needed.
+
+### Building the image locally
+
+```sh
+just docker-context v0.2.0      # stage the linux binaries next to the Dockerfile
+docker build -t pcap-toolkit:dev .
+```
+
+`just docker-context` reuses the tarballs produced by `just package-all`
+if they exist, otherwise it downloads them from the Codeberg release for
+the given tag.
+
 ## Manual download
 
 If you'd rather not run the install script, grab the archive for your

@@ -32,6 +32,7 @@ lcov.info
 
 # Release artifacts
 dist/
+pcap-toolkit-linux-*
 
 # Nix
 .direnv/

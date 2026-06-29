@@ -187,6 +187,33 @@ _release-tag-push VERSION:
     git tag -a {{VERSION}} -m "Release {{VERSION}}"
     git push origin {{VERSION}}
 
+# Stage Linux release binaries next to the Dockerfile so `docker build` works.
+# Pulls from local dist/ if `just package-all VERSION` has been run; otherwise
+# fetches the tarballs from the Codeberg release for VERSION.
+# Usage: just docker-context v0.2.0
+docker-context VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for pair in "amd64:x86_64-unknown-linux-musl" "arm64:aarch64-unknown-linux-musl"; do
+        docker_arch="${pair%%:*}"
+        rust_target="${pair##*:}"
+        archive="dist/{{binary_name}}-{{VERSION}}-${rust_target}.tar.gz"
+        if [[ ! -f "$archive" ]]; then
+            echo "fetching ${archive} from Codeberg..."
+            mkdir -p dist
+            curl -fsSL "https://codeberg.org/{{codeberg_owner}}/{{codeberg_repo}}/releases/download/{{VERSION}}/$(basename "$archive")" \
+                -o "$archive"
+        fi
+        rm -rf "dist/extract-${docker_arch}"
+        mkdir -p "dist/extract-${docker_arch}"
+        tar -xzf "$archive" -C "dist/extract-${docker_arch}"
+        cp "dist/extract-${docker_arch}/{{binary_name}}-{{VERSION}}-${rust_target}/{{binary_name}}" \
+            "{{binary_name}}-linux-${docker_arch}"
+        rm -rf "dist/extract-${docker_arch}"
+    done
+    echo "docker build context ready:"
+    ls -la {{binary_name}}-linux-*
+
 _release-codeberg VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
