@@ -155,33 +155,12 @@ CLI flags take precedence over the config file.
 
 ## Installation
 
-### Pre-built binaries
-
-Download the latest binary for your platform from the
-[releases page](https://codeberg.org/slundi/pcap-toolkit/releases).
-
-### From crates.io
+One-liner (Linux / macOS / WSL):
 
 ```sh
-cargo install pcap-toolkit
+curl -fsSL https://codeberg.org/slundi/pcap-toolkit/raw/branch/master/install.sh | bash
 ```
 
-### With Nix
-
-```sh
-nix run codeberg:slundi/pcap-toolkit
-```
-
-Or add it permanently to your NixOS configuration or home-manager:
-
-```nix
-inputs.pcap-toolkit.url = "git+https://codeberg.org/slundi/pcap-toolkit.git";
-```
-
-### From source
-
-```sh
-git clone https://codeberg.org/slundi/pcap-toolkit.git
-cd pcap-toolkit
-cargo install --path .
-```
+`cargo install pcap-toolkit`, Nix, and source builds are also supported.
+See [docs/Install.md](docs/Install.md) for all install methods, options, and
+supported platforms.
