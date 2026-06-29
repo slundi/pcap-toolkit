@@ -139,7 +139,9 @@ impl IndexStore {
     pub fn into_sorted(self) -> Result<Vec<PacketIndex>, SortError> {
         match self {
             IndexStore::Memory(mut v) => {
-                v.sort_unstable_by_key(|e| e.timestamp_ns);
+                // Stable sort on (timestamp_ns, byte_offset): equal timestamps
+                // retain capture order so retransmission analysis stays valid.
+                v.sort_by_key(|e| (e.timestamp_ns, e.byte_offset));
                 Ok(v)
             }
             IndexStore::Disk {
@@ -150,7 +152,7 @@ impl IndexStore {
                 writer.flush()?;
                 drop(writer);
                 let mut entries = read_disk_index(&path, count)?;
-                entries.sort_unstable_by_key(|e| e.timestamp_ns);
+                entries.sort_by_key(|e| (e.timestamp_ns, e.byte_offset));
                 Ok(entries)
             }
         }
@@ -193,19 +195,33 @@ pub fn sidecar_path(input: &Path) -> PathBuf {
     input.with_file_name(format!("{name}.idx"))
 }
 
+/// Hard ceiling on `caplen` accepted by [`read_packet_at`].
+///
+/// PCAP snaplen is a `u32`, so a corrupted index can request a 4 GiB allocation
+/// per packet. We cap at 256 KiB — well above the largest realistic frame
+/// (IPv6 jumbograms top out at 65535 bytes; 9000-byte jumbos are typical).
+pub const MAX_CAPLEN: u32 = 256 * 1024;
+
 /// Seek `file` to `offset`, read the 16-byte PCAP record header to recover
 /// `origlen`, then read `caplen` bytes of packet data.
 ///
 /// Returns `(origlen, packet_data)`.
 ///
 /// # Errors
-/// Returns [`SortError::Io`] on seek or read failure.
+/// - [`SortError::CaplenTooLarge`] if `caplen` exceeds [`MAX_CAPLEN`].
+/// - [`SortError::Io`] on seek or read failure.
 pub fn read_packet_at(
     file: &mut File,
     offset: u64,
     caplen: u32,
     big_endian: bool,
 ) -> Result<(u32, Vec<u8>), SortError> {
+    if caplen > MAX_CAPLEN {
+        return Err(SortError::CaplenTooLarge {
+            caplen,
+            max: MAX_CAPLEN,
+        });
+    }
     file.seek(SeekFrom::Start(offset))?;
     let mut hdr = [0u8; 16];
     file.read_exact(&mut hdr)?;
@@ -272,6 +288,49 @@ mod tests {
             sorted.iter().map(|e| e.timestamp_ns).collect::<Vec<_>>(),
             [100, 200, 300]
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_memory_store_stable_on_equal_timestamps() {
+        // Packets with the same timestamp must keep their capture order
+        // (tie-break is byte_offset, which is monotonic per file).
+        let mut store = IndexStore::memory();
+        for (ts, off) in [
+            (1000u64, 10u64),
+            (1000, 20),
+            (1000, 30),
+            (500, 40),
+            (1000, 50),
+        ] {
+            store
+                .push(PacketIndex {
+                    timestamp_ns: ts,
+                    byte_offset: off,
+                    caplen: 60,
+                })
+                .unwrap();
+        }
+        let sorted = store.into_sorted().unwrap();
+        assert_eq!(
+            sorted.iter().map(|e| e.byte_offset).collect::<Vec<_>>(),
+            [40, 10, 20, 30, 50]
+        );
+    }
+
+    #[test]
+    fn test_read_packet_at_rejects_oversized_caplen() {
+        // Create a tiny file — content doesn't matter; we should error before
+        // any read on the oversized caplen.
+        let path = std::env::temp_dir().join("pcap_toolkit_test_caplen.bin");
+        std::fs::write(&path, b"").unwrap();
+        let mut file = File::open(&path).unwrap();
+        let err = read_packet_at(&mut file, 0, MAX_CAPLEN + 1, false).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::SortError::CaplenTooLarge { caplen, max }
+                if caplen == MAX_CAPLEN + 1 && max == MAX_CAPLEN
+        ));
         let _ = std::fs::remove_file(&path);
     }
 
