@@ -21,9 +21,6 @@ pub struct Config {
     /// Packet filter options.
     pub filter: FilterConfig,
 
-    /// Output targets.
-    pub output: Vec<OutputConfig>,
-
     /// Packet-level transformation options.
     pub transform: TransformConfig,
 
@@ -173,6 +170,13 @@ pub struct ExportConfig {
     pub outputs: Vec<ExportOutputConfig>,
 
     /// Legacy single output path (superseded by `[[export.outputs]]`).
+    ///
+    /// Prefer the `outputs` fan-out form for new configs. This field will be
+    /// removed in a future release.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use `outputs` (fan-out) instead; will be removed before 1.0"
+    )]
     pub path: Option<PathBuf>,
 
     /// Override output format: `"json"`, `"parquet"`, or `"avro"`.
@@ -183,19 +187,6 @@ pub struct ExportConfig {
 
     /// Compute flow IDs unidirectionally (default: bidirectional).
     pub unidirectional: bool,
-}
-
-/// Output target configuration.
-#[derive(Debug)]
-pub struct OutputConfig {
-    /// Output format: `"pcap"`, `"json"`, `"parquet"`, or `"avro"`.
-    pub format: String,
-
-    /// Output file path.
-    pub path: PathBuf,
-
-    /// Compress payload field (JSON / Parquet).
-    pub compress_payload: bool,
 }
 
 /// Live replay configuration.
@@ -232,9 +223,6 @@ impl<'de> Deserialize<'de> for Config {
         let input = th.optional::<Vec<InputConfig>>("input").unwrap_or_default();
         let sort = th.optional::<SortConfig>("sort").unwrap_or_default();
         let filter = th.optional::<FilterConfig>("filter").unwrap_or_default();
-        let output = th
-            .optional::<Vec<OutputConfig>>("output")
-            .unwrap_or_default();
         let transform = th
             .optional::<TransformConfig>("transform")
             .unwrap_or_default();
@@ -245,7 +233,6 @@ impl<'de> Deserialize<'de> for Config {
             input,
             sort,
             filter,
-            output,
             transform,
             export,
             replay,
@@ -404,6 +391,8 @@ impl<'de> Deserialize<'de> for ExportOutputConfig {
 }
 
 impl<'de> Deserialize<'de> for ExportConfig {
+    // Intentionally populates the deprecated `path` field for back-compat.
+    #[allow(deprecated)]
     fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
         let mut th = TableHelper::new(value)?;
         let outputs = th
@@ -420,21 +409,6 @@ impl<'de> Deserialize<'de> for ExportConfig {
             format,
             compress_payload,
             unidirectional,
-        })
-    }
-}
-
-impl<'de> Deserialize<'de> for OutputConfig {
-    fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
-        let mut th = TableHelper::new(value)?;
-        let format = th.required::<String>("format")?;
-        let path = th.required::<String>("path").map(PathBuf::from)?;
-        let compress_payload = th.optional::<bool>("compress_payload").unwrap_or(false);
-        th.finalize(None)?;
-        Ok(OutputConfig {
-            format,
-            path,
-            compress_payload,
         })
     }
 }
@@ -507,10 +481,6 @@ proto = ["tcp", "udp"]
 dst_port = ["443", "80"]
 src_ip = ["10.0.0.0/8"]
 
-[[output]]
-format = "parquet"
-path = "out/traffic.parquet"
-
 [replay]
 interface = "eth0"
 speed = 2.0
@@ -524,8 +494,6 @@ speed = 2.0
         assert_eq!(config.sort.slice.as_deref(), Some("1h"));
         assert_eq!(config.filter.proto, ["tcp", "udp"]);
         assert_eq!(config.filter.dst_port, ["443", "80"]);
-        assert_eq!(config.output.len(), 1);
-        assert_eq!(config.output[0].format, "parquet");
         assert_eq!(config.replay.speed, 2.0);
         assert_eq!(config.replay.interfaces, ["eth0"]);
     }

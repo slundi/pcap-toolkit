@@ -126,20 +126,6 @@ max_payload_bytes = 128   # keep HTTP/TLS headers but trim large bodies
 proto             = "udp"
 max_payload_bytes = 64    # enough for a DNS query/response header
 
-# ── Output ────────────────────────────────────────────────────────────────────
-# One or more output targets. Format is inferred from the file extension
-# (.pcap, .jsonl, .parquet, .avro) or set explicitly with `format`.
-
-[[output]]
-format           = "pcap"
-path             = "out/sorted.pcap"
-compress_payload = false
-
-[[output]]
-format           = "parquet"
-path             = "out/traffic.parquet"
-compress_payload = true
-
 # ── Export ────────────────────────────────────────────────────────────────────
 # Structured data export (JSON Lines, Parquet, or Avro).
 # Used by the `export` subcommand.

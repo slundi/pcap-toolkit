@@ -380,6 +380,10 @@ fn build_transform(args: &cli::SortArgs, cfg: &TransformConfig) -> Result<Transf
     Ok(t)
 }
 
+// Intentional read of the deprecated `ExportConfig::path` field for backward
+// compatibility with pre-0.2 TOML configs; remove the allow once the field
+// is itself removed.
+#[allow(deprecated)]
 fn cmd_export(args: &crate::cli::export::ExportArgs, config: &Config) -> Result<()> {
     // Validate --format if explicitly provided.
     if let Some(s) = &args.format
