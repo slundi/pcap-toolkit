@@ -47,6 +47,13 @@ pub enum FilterError {
 
     #[error("invalid filter operator (expected 'and', 'or', or 'not'): '{0}'")]
     InvalidOp(String),
+
+    #[error("invalid range: {field} lower bound {lo} is greater than upper bound {hi}")]
+    InvalidRange {
+        field: &'static str,
+        lo: u64,
+        hi: u64,
+    },
 }
 
 // ── IpNet ────────────────────────────────────────────────────────────────────
@@ -714,6 +721,68 @@ impl Filter {
             && self.max_len.is_none()
     }
 
+    /// Check that the filter's range bounds are internally consistent.
+    ///
+    /// Catches cases that would silently reject every packet, e.g. an
+    /// inverted timestamp window (`from_ns > to_ns`) or `min_len > max_len`.
+    /// All other fields (sets, optional values) cannot be inconsistent in
+    /// themselves and are not checked here.
+    ///
+    /// # Errors
+    /// Returns [`FilterError::InvalidRange`] for the first bad pair found.
+    ///
+    /// # Examples
+    /// ```
+    /// use pcap_toolkit::filter::Filter;
+    /// let f = Filter {
+    ///     from_ns: Some(2_000),
+    ///     to_ns: Some(1_000),
+    ///     ..Filter::default()
+    /// };
+    /// assert!(f.validate().is_err());
+    /// ```
+    pub fn validate(&self) -> Result<(), FilterError> {
+        if let (Some(lo), Some(hi)) = (self.from_ns, self.to_ns)
+            && lo > hi
+        {
+            return Err(FilterError::InvalidRange {
+                field: "timestamp",
+                lo,
+                hi,
+            });
+        }
+        if let (Some(lo), Some(hi)) = (self.min_len, self.max_len)
+            && lo > hi
+        {
+            return Err(FilterError::InvalidRange {
+                field: "length",
+                lo: lo as u64,
+                hi: hi as u64,
+            });
+        }
+        for rule in &self.rules {
+            if let (Some(lo), Some(hi)) = (rule.from_ns, rule.to_ns)
+                && lo > hi
+            {
+                return Err(FilterError::InvalidRange {
+                    field: "rule timestamp",
+                    lo,
+                    hi,
+                });
+            }
+            if let (Some(lo), Some(hi)) = (rule.min_len, rule.max_len)
+                && lo > hi
+            {
+                return Err(FilterError::InvalidRange {
+                    field: "rule length",
+                    lo: lo as u64,
+                    hi: hi as u64,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Evaluate the filter against `meta`.
     ///
     /// 1. Evaluate the base flat body.
@@ -1354,5 +1423,81 @@ mod tests {
         };
         assert!(f.matches(&no_flow_meta(0, 60)));
         assert!(!f.matches(&no_flow_meta(0, 40)));
+    }
+
+    // ── Filter::validate ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_filter_validate_accepts_default() {
+        assert!(Filter::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_filter_validate_rejects_inverted_timestamp_window() {
+        let f = Filter {
+            from_ns: Some(2_000),
+            to_ns: Some(1_000),
+            ..Default::default()
+        };
+        assert!(matches!(
+            f.validate(),
+            Err(FilterError::InvalidRange {
+                field: "timestamp",
+                lo: 2_000,
+                hi: 1_000
+            })
+        ));
+    }
+
+    #[test]
+    fn test_filter_validate_rejects_inverted_length_window() {
+        let f = Filter {
+            min_len: Some(1500),
+            max_len: Some(64),
+            ..Default::default()
+        };
+        assert!(matches!(
+            f.validate(),
+            Err(FilterError::InvalidRange {
+                field: "length",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_filter_validate_accepts_equal_bounds() {
+        // lo == hi defines a single-point window — that's a legitimate intent,
+        // not a misconfiguration, so it must pass.
+        let f = Filter {
+            from_ns: Some(1_000),
+            to_ns: Some(1_000),
+            min_len: Some(100),
+            max_len: Some(100),
+            ..Default::default()
+        };
+        assert!(f.validate().is_ok());
+    }
+
+    #[test]
+    fn test_filter_validate_checks_rules_too() {
+        // An inverted range inside a chained rule must also be caught.
+        let rule = FilterRule {
+            op: Op::And,
+            from_ns: Some(100),
+            to_ns: Some(50),
+            ..FilterRule::default()
+        };
+        let f = Filter {
+            rules: vec![rule],
+            ..Default::default()
+        };
+        assert!(matches!(
+            f.validate(),
+            Err(FilterError::InvalidRange {
+                field: "rule timestamp",
+                ..
+            })
+        ));
     }
 }
