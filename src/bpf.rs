@@ -189,9 +189,18 @@ pub enum BpfExpr {
 
 // ── Parser ────────────────────────────────────────────────────────────────────
 
+/// Maximum grammar nesting depth accepted by the parser.
+///
+/// Bounds both parse-time stack growth and the depth of the produced
+/// `BpfExpr` tree (and therefore the depth of `eval` recursion per packet).
+/// Real-world tcpdump filters rarely exceed depth 10; 128 leaves ample
+/// headroom while keeping adversarial input from blowing the stack.
+pub const MAX_PARSE_DEPTH: usize = 128;
+
 struct Parser {
     toks: Vec<(Tok, usize)>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
@@ -253,12 +262,14 @@ impl Parser {
     }
 
     fn parse_or(&mut self) -> Result<BpfExpr, BpfError> {
+        self.enter_depth()?;
         let mut left = self.parse_and()?;
         while self.peek_word() == Some("or") {
             self.advance();
             let right = self.parse_and()?;
             left = BpfExpr::Or(Box::new(left), Box::new(right));
         }
+        self.depth -= 1;
         Ok(left)
     }
 
@@ -275,7 +286,9 @@ impl Parser {
     fn parse_not(&mut self) -> Result<BpfExpr, BpfError> {
         if self.peek_word() == Some("not") {
             self.advance();
+            self.enter_depth()?;
             let inner = self.parse_not()?; // right-associative
+            self.depth -= 1;
             return Ok(BpfExpr::Not(Box::new(inner)));
         }
         if self.peek() == Some(&Tok::LParen) {
@@ -288,6 +301,16 @@ impl Parser {
             return Ok(inner);
         }
         self.parse_primitive()
+    }
+
+    fn enter_depth(&mut self) -> Result<(), BpfError> {
+        if self.depth >= MAX_PARSE_DEPTH {
+            return Err(self.err(format!(
+                "expression nests more than {MAX_PARSE_DEPTH} levels deep"
+            )));
+        }
+        self.depth += 1;
+        Ok(())
     }
 
     fn parse_primitive(&mut self) -> Result<BpfExpr, BpfError> {
@@ -484,7 +507,11 @@ pub fn parse(input: &str) -> Result<BpfExpr, BpfError> {
             col: 0,
         });
     }
-    let mut parser = Parser { toks, pos: 0 };
+    let mut parser = Parser {
+        toks,
+        pos: 0,
+        depth: 0,
+    };
     parser.parse_expr()
 }
 
@@ -933,5 +960,58 @@ mod tests {
         )));
         // fails: ICMP from 10.x
         assert!(!expr.eval(&make_meta(100, v4(10, 0, 0, 1), v4(8, 8, 8, 8), 0, 0, 1)));
+    }
+
+    // ── Recursion-depth guard ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_rejects_excessive_nesting() {
+        // Pathological input: thousands of nested parens. Without a depth
+        // guard the recursive-descent parser would blow the stack.
+        let n = MAX_PARSE_DEPTH + 50;
+        let mut src = String::with_capacity(2 * n + 4);
+        for _ in 0..n {
+            src.push('(');
+        }
+        src.push_str("tcp");
+        for _ in 0..n {
+            src.push(')');
+        }
+        let err = parse(&src).expect_err("deeply nested input must error");
+        assert!(
+            err.message.contains("nests more than"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_excessive_not_chain() {
+        // `not not not ...` recurses through parse_not itself.
+        let n = MAX_PARSE_DEPTH + 50;
+        let mut src = String::with_capacity(4 * n + 4);
+        for _ in 0..n {
+            src.push_str("not ");
+        }
+        src.push_str("tcp");
+        let err = parse(&src).expect_err("deeply chained not must error");
+        assert!(
+            err.message.contains("nests more than"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_accepts_moderate_nesting() {
+        // Within the limit, parens nest fine.
+        let n = 20;
+        let mut src = String::with_capacity(2 * n + 4);
+        for _ in 0..n {
+            src.push('(');
+        }
+        src.push_str("tcp");
+        for _ in 0..n {
+            src.push(')');
+        }
+        assert!(parse(&src).is_ok());
     }
 }
