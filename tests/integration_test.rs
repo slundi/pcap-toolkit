@@ -930,7 +930,10 @@ fn test_export_json_packet_count() {
         assert_eq!(v["src_port"], 1234);
         assert_eq!(v["dst_port"], 53);
         assert_eq!(v["protocol"], 17); // UDP
-        assert!(v["flow_id"].is_string());
+        assert!(
+            v["flow_id"].is_u64() || v["flow_id"].is_i64(),
+            "flow_id must be a numeric u64"
+        );
         assert!(v["payload"].is_string()); // base64-encoded
         assert_eq!(v["payload_encoding"], "base64");
     }
@@ -2055,7 +2058,10 @@ fn test_fixture_dns_export_json_all_udp() {
     for line in content.lines() {
         let v: serde_json::Value = serde_json::from_str(line).unwrap();
         assert_eq!(v["protocol"], 17, "all DNS packets must be UDP");
-        assert!(v["flow_id"].is_string(), "UDP DNS packets have a flow_id");
+        assert!(
+            v["flow_id"].is_u64() || v["flow_id"].is_i64(),
+            "UDP DNS packets have a numeric flow_id"
+        );
     }
 
     let _ = std::fs::remove_file(&output);
@@ -2258,5 +2264,207 @@ fn test_fixture_mixed_min_flow_packets_threshold() {
         "only the 6-packet TCP flow survives"
     );
 
+    let _ = std::fs::remove_file(&output);
+}
+
+// ── Round-trip / decoder tests ────────────────────────────────────────────────
+
+#[test]
+fn test_export_parquet_roundtrip_readable() {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0xAB; 8]);
+    let pcap_data = build_pcap(&[(1, 0, frame.clone()), (2, 0, frame)]);
+    let input = write_tmp_pcap("export_parquet_rt_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_parquet_rt_out.parquet");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Parquet),
+        ..ExportOptions::default()
+    };
+    let report = export_file(&input, &opts).unwrap();
+    assert_eq!(report.packets_written, 2);
+
+    // Reopen and read every row back.
+    let file = std::fs::File::open(&output).unwrap();
+    let reader = SerializedFileReader::new(file).expect("parquet file must parse");
+    let meta = reader.metadata();
+    assert_eq!(meta.file_metadata().num_rows(), 2, "two rows expected");
+    let row_iter = reader.get_row_iter(None).unwrap();
+    let mut seen = 0;
+    for row in row_iter {
+        let row = row.unwrap();
+        let dump = format!("{row:?}");
+        // Field presence is enough — confirms columns are wired up correctly.
+        assert!(dump.contains("src_ip"));
+        assert!(dump.contains("flow_id"));
+        assert!(dump.contains("payload"));
+        seen += 1;
+    }
+    assert_eq!(seen, 2);
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_export_avro_roundtrip_readable() {
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0xCD; 4]);
+    let pcap_data = build_pcap(&[(1, 0, frame.clone()), (2, 0, frame)]);
+    let input = write_tmp_pcap("export_avro_rt_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_avro_rt_out.avro");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Avro),
+        ..ExportOptions::default()
+    };
+    export_file(&input, &opts).unwrap();
+
+    // Reopen and decode every record back via apache_avro.
+    let file = std::fs::File::open(&output).unwrap();
+    let reader = apache_avro::Reader::new(file).expect("avro file must parse");
+    let records: Vec<_> = reader
+        .collect::<Result<_, _>>()
+        .expect("all records decode");
+    assert_eq!(records.len(), 2);
+
+    // Spot-check one record: it must contain the expected fields.
+    if let apache_avro::types::Value::Record(fields) = &records[0] {
+        let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"timestamp_ns"));
+        assert!(names.contains(&"flow_id"));
+        assert!(names.contains(&"payload"));
+    } else {
+        panic!("expected a Record value");
+    }
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(output.with_extension("avsc"));
+}
+
+#[test]
+fn test_export_compress_payload_json_roundtrip() {
+    // Verify compress_payload=true on JSON produces a file whose base64+zstd
+    // payload round-trips back to the original bytes.
+    use base64::Engine as _;
+
+    let payload = vec![0x42u8; 512]; // compressible (repeated bytes)
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &payload);
+    let pcap_data = build_pcap(&[(1, 0, frame)]);
+    let input = write_tmp_pcap("export_json_zstd_rt_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_json_zstd_rt_out.jsonl");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Json),
+        compress_payload: true,
+        ..ExportOptions::default()
+    };
+    let report = export_file(&input, &opts).unwrap();
+    assert_eq!(report.packets_written, 1);
+
+    let line = std::fs::read_to_string(&output).unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["payload_encoding"], "zstd+base64");
+    let encoded = v["payload"].as_str().unwrap();
+    let compressed = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+    let decoded = zstd::decode_all(compressed.as_slice()).unwrap();
+    // The decoded blob is the full captured Ethernet frame. It must contain
+    // the original UDP payload bytes verbatim.
+    assert!(
+        decoded.windows(payload.len()).any(|w| w == payload),
+        "decoded ({}B) must contain the {}-byte payload",
+        decoded.len(),
+        payload.len()
+    );
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_export_compress_payload_avro_roundtrip() {
+    // Avro uses Codec::Zstandard when compress_payload=true. The file must
+    // still be decodable by apache_avro::Reader.
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0xEE; 64]);
+    let pcap_data = build_pcap(&[(1, 0, frame.clone()), (2, 0, frame)]);
+    let input = write_tmp_pcap("export_avro_zstd_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_avro_zstd_out.avro");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Avro),
+        compress_payload: true,
+        ..ExportOptions::default()
+    };
+    export_file(&input, &opts).unwrap();
+
+    let file = std::fs::File::open(&output).unwrap();
+    let reader = apache_avro::Reader::new(file).unwrap();
+    let count = reader.into_iter().count();
+    assert_eq!(count, 2, "zstd-compressed avro must decode to 2 records");
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(output.with_extension("avsc"));
+}
+
+#[test]
+fn test_export_compress_payload_parquet_roundtrip() {
+    // Parquet uses Compression::ZSTD when compress_payload=true. Reopen with
+    // SerializedFileReader and confirm the rows are still readable.
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0xFA; 32]);
+    let pcap_data = build_pcap(&[(1, 0, frame.clone()), (2, 0, frame)]);
+    let input = write_tmp_pcap("export_parquet_zstd_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_parquet_zstd_out.parquet");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Parquet),
+        compress_payload: true,
+        ..ExportOptions::default()
+    };
+    export_file(&input, &opts).unwrap();
+
+    let file = std::fs::File::open(&output).unwrap();
+    let reader = SerializedFileReader::new(file).unwrap();
+    assert_eq!(reader.metadata().file_metadata().num_rows(), 2);
+    let count = reader.get_row_iter(None).unwrap().count();
+    assert_eq!(count, 2);
+
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn test_export_json_flow_id_is_numeric_u64() {
+    // Regression: previously emitted as a 16-hex string, breaking cross-sink
+    // joins with Avro/Parquet which emit the same value as i64.
+    let frame = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0; 4]);
+    let pcap_data = build_pcap(&[(1, 0, frame)]);
+    let input = write_tmp_pcap("export_json_flowid_in.pcap", &pcap_data);
+    let output = std::env::temp_dir().join("export_json_flowid_out.jsonl");
+
+    let opts = ExportOptions {
+        output: output.clone(),
+        format: Some(ExportFormat::Json),
+        ..ExportOptions::default()
+    };
+    export_file(&input, &opts).unwrap();
+
+    let line = std::fs::read_to_string(&output).unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    // Must be a JSON number (u64-safe), not a string.
+    let fid = v["flow_id"].as_u64().expect("flow_id must be a u64 number");
+    assert_ne!(fid, 0, "flow_id should not be zero for UDP traffic");
+
+    let _ = std::fs::remove_file(&input);
     let _ = std::fs::remove_file(&output);
 }

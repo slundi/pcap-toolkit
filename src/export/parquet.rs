@@ -13,7 +13,7 @@
 //!   OPTIONAL INT32  src_port;
 //!   OPTIONAL INT32  dst_port;
 //!   OPTIONAL INT32  protocol;
-//!   OPTIONAL INT64  flow_id;
+//!   OPTIONAL INT64  flow_id (INTEGER(64,false));
 //!   REQUIRED INT32  caplen;
 //!   REQUIRED INT32  origlen;
 //!   OPTIONAL INT32  tcp_flags;
@@ -52,7 +52,7 @@ message schema {
   OPTIONAL INT32  src_port;
   OPTIONAL INT32  dst_port;
   OPTIONAL INT32  protocol;
-  OPTIONAL INT64  flow_id;
+  OPTIONAL INT64  flow_id (INTEGER(64,false));
   REQUIRED INT32  caplen;
   REQUIRED INT32  origlen;
   OPTIONAL INT32  tcp_flags;

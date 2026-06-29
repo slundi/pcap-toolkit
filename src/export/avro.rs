@@ -33,7 +33,7 @@ pub const AVRO_SCHEMA: &str = r#"
     {"name": "src_port",     "type": ["null", "int"],      "default": null, "doc": "Source port (TCP/UDP only)."},
     {"name": "dst_port",     "type": ["null", "int"],      "default": null, "doc": "Destination port (TCP/UDP only)."},
     {"name": "protocol",     "type": ["null", "int"],      "default": null, "doc": "IP protocol number (6=TCP, 17=UDP, …)."},
-    {"name": "flow_id",      "type": ["null", "long"],     "default": null, "doc": "Deterministic 64-bit flow identifier."},
+    {"name": "flow_id",      "type": ["null", "long"],     "default": null, "doc": "Deterministic 64-bit flow identifier. Avro has no unsigned 64-bit type, so the u64 bit pattern is stored as a signed long (interpret bitwise to recover the original u64)."},
     {"name": "caplen",       "type": "int",                                 "doc": "Captured bytes (wire length may differ)."},
     {"name": "origlen",      "type": "int",                                 "doc": "Original wire length."},
     {"name": "tcp_flags",    "type": ["null", "int"],      "default": null, "doc": "TCP control flags bitmask."},

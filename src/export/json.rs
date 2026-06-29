@@ -32,7 +32,7 @@ struct JsonPacket<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     protocol: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    flow_id: Option<String>,
+    flow_id: Option<u64>,
     caplen: u32,
     origlen: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,7 +103,7 @@ impl PacketSink for JsonSink {
             src_port: record.src_port,
             dst_port: record.dst_port,
             protocol: record.protocol,
-            flow_id: record.flow_id.map(|id| format!("{id:016x}")),
+            flow_id: record.flow_id,
             caplen: record.caplen,
             origlen: record.origlen,
             tcp_flags: record.tcp_flags,
