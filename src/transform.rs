@@ -145,6 +145,13 @@ pub struct TransformOptions {
     /// The delta is computed once in [`second_pass`] and passed as `ts_delta`.
     pub timestamp_start_ns: Option<u64>,
     /// IP address replacement rules, evaluated in order for every packet.
+    ///
+    /// Rules are applied **sequentially within a single pass**, so an earlier
+    /// rule's `new` address is visible to later rules. With mappings
+    /// `[A=B, B=C]`, an address `A` is rewritten to `B` by the first rule and
+    /// then to `C` by the second — i.e. substitutions chain. If you want
+    /// independent substitutions, order the rules so earlier `new` values are
+    /// never the input of a later rule, or use disjoint address ranges.
     pub ip_map: Vec<IpMapping>,
     /// Per-protocol payload truncation rules (TOML: `[[transform.truncate_by_proto]]`).
     ///
@@ -1060,6 +1067,26 @@ mod tests {
         // IPv4 src IP: Ethernet(14) + IP offset 12 = byte 26
         assert_eq!(&data[26..30], &[192, 168, 1, 1]);
         assert_eq!(&data[30..34], &[8, 8, 8, 8]); // dst unchanged
+    }
+
+    #[test]
+    fn test_ip_mapping_rules_chain_within_one_pass() {
+        // Documented behavior: rules are applied sequentially in a single pass,
+        // so [A=B, B=C] rewrites A → B → C in one go. This test pins that
+        // semantics down so a future change can't quietly switch to disjoint
+        // application without updating the docs.
+        let mut data = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &[0u8; 4]);
+        let origlen = data.len() as u32;
+        let opts = TransformOptions {
+            ip_map: vec![
+                parse_ip_mapping("10.0.0.1=192.168.1.1").unwrap(),
+                parse_ip_mapping("192.168.1.1=172.16.0.1").unwrap(),
+            ],
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, origlen, &opts);
+        // Final value reflects both substitutions (A → B → C).
+        assert_eq!(&data[26..30], &[172, 16, 0, 1]);
     }
 
     #[test]
