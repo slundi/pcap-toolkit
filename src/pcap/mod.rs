@@ -42,7 +42,7 @@ const BUF_SIZE: usize = 65536;
 
 /// Convert a pcap-parser error (with any slice type) to our error type.
 fn map_pcap_err<I: std::fmt::Debug>(e: PcapError<I>) -> ToolkitPcapError {
-    ToolkitPcapError::Parse(format!("{e:?}"))
+    ToolkitPcapError::Parse(e.to_string())
 }
 
 /// Iterate over packets in a legacy PCAP file.

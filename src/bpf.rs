@@ -120,8 +120,16 @@ fn tokenize(input: &str) -> Result<Vec<(Tok, usize)>, BpfError> {
                     i += 1;
                 }
                 if i == start {
+                    // Report the actual UTF-8 character at `col`, not the
+                    // single byte. Lossy-casting `b[col] as char` would
+                    // misrender multibyte sequences (e.g. 'é' as 'Ã').
+                    let ch = input[col..]
+                        .chars()
+                        .next()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "?".to_owned());
                     return Err(BpfError {
-                        message: format!("unexpected character '{}'", b[col] as char),
+                        message: format!("unexpected character '{ch}'"),
                         col,
                     });
                 }
@@ -1044,5 +1052,19 @@ mod tests {
             src.push(')');
         }
         assert!(parse(&src).is_ok());
+    }
+
+    #[test]
+    fn test_tokenize_unexpected_char_reports_full_utf8_char() {
+        // Regression: the tokenizer used to lossy-cast a single byte to char,
+        // misrendering multibyte UTF-8 sequences. Make sure the actual code
+        // point appears in the error message and that no panic occurs.
+        let err = parse("é").expect_err("non-ASCII garbage should error");
+        assert!(
+            err.message.contains('é'),
+            "error message must include the offending char; got: {}",
+            err.message
+        );
+        assert_eq!(err.col, 0);
     }
 }

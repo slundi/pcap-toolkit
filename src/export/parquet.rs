@@ -29,7 +29,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use parquet::basic::{Compression, Repetition, ZstdLevel};
+use parquet::basic::{Compression, ZstdLevel};
 use parquet::column::writer::ColumnWriter;
 use parquet::data_type::ByteArray;
 use parquet::file::properties::WriterProperties;
@@ -395,16 +395,4 @@ fn write_optional_binary(
     }
     col.close().map_err(ExportError::from)?;
     Ok(())
-}
-
-/// Check which physical type the schema assigns to each column index.
-/// Used only for sanity testing; not called in production.
-pub fn column_repetitions() -> Vec<(usize, Repetition)> {
-    let schema = parse_message_type(SCHEMA_STR).unwrap();
-    schema
-        .get_fields()
-        .iter()
-        .enumerate()
-        .map(|(i, f)| (i, f.get_basic_info().repetition()))
-        .collect()
 }

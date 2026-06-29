@@ -993,6 +993,34 @@ mod tests {
         assert!(parse_proto_list("foobar").is_err());
     }
 
+    #[test]
+    fn test_parse_proto_list_named_extras() {
+        // Less common protocols accepted by name (regression: previously
+        // uncovered).
+        assert_eq!(parse_proto_list("sctp").unwrap(), [132]);
+        assert_eq!(parse_proto_list("esp").unwrap(), [50]);
+        assert_eq!(parse_proto_list("ah").unwrap(), [51]);
+        assert_eq!(parse_proto_list("icmpv6").unwrap(), [58]);
+        assert_eq!(
+            parse_proto_list("tcp,sctp,esp,ah").unwrap(),
+            [6, 132, 50, 51]
+        );
+    }
+
+    #[test]
+    fn test_tcp_flags_any_suffix_matches_default() {
+        // The `:any` suffix is documented but was previously untested.
+        // It must behave identically to the bare form: at least one bit set.
+        let bare = TcpFlagsFilter::parse("SYN+ACK").unwrap();
+        let any = TcpFlagsFilter::parse("SYN+ACK:any").unwrap();
+        assert_eq!(bare, any);
+        // Matches packets with either flag bit set.
+        assert!(any.matches(0x02)); // SYN
+        assert!(any.matches(0x10)); // ACK
+        assert!(any.matches(0x12)); // SYN+ACK
+        assert!(!any.matches(0x04)); // RST only
+    }
+
     // ── parse_flow_ids ───────────────────────────────────────────────────────
 
     #[test]
@@ -1499,5 +1527,69 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // ── Filter::matches with negate and rule chains ──────────────────────────
+
+    #[test]
+    fn test_filter_negate_inverts_base_result() {
+        // Base body matches TCP. With negate=true, only non-TCP packets pass.
+        let f = Filter {
+            negate: true,
+            protocols: vec![6],
+            ..Default::default()
+        };
+        let tcp_pkt = meta(0, 60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 80, 80, 6, 0);
+        let udp_pkt = meta(0, 60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 80, 80, 17, 0);
+        assert!(!f.matches(&tcp_pkt));
+        assert!(f.matches(&udp_pkt));
+    }
+
+    #[test]
+    fn test_filter_rule_chain_and_or_not() {
+        // Build a filter equivalent to: (proto=tcp) AND (dst_port=443)
+        let mut f = Filter {
+            protocols: vec![6],
+            ..Default::default()
+        };
+        f.rules.push(FilterRule {
+            op: Op::And,
+            dst_ports: vec![PortRange::parse("443").unwrap()],
+            ..FilterRule::default()
+        });
+        let tcp_443 = meta(0, 60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 5000, 443, 6, 0);
+        let tcp_80 = meta(0, 60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 5000, 80, 6, 0);
+        let udp_443 = meta(0, 60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 5000, 443, 17, 0);
+        assert!(f.matches(&tcp_443));
+        assert!(!f.matches(&tcp_80));
+        assert!(!f.matches(&udp_443));
+
+        // OR rule: (proto=tcp) OR (proto=udp)
+        let mut f = Filter {
+            protocols: vec![6],
+            ..Default::default()
+        };
+        f.rules.push(FilterRule {
+            op: Op::Or,
+            protocols: vec![17],
+            ..FilterRule::default()
+        });
+        assert!(f.matches(&tcp_443));
+        assert!(f.matches(&udp_443));
+        let icmp = meta(0, 60, v4(1, 1, 1, 1), v4(2, 2, 2, 2), 0, 0, 1, 0);
+        assert!(!f.matches(&icmp));
+
+        // NOT rule: (proto=tcp) AND NOT (dst_port=80) — exclude TCP port 80.
+        let mut f = Filter {
+            protocols: vec![6],
+            ..Default::default()
+        };
+        f.rules.push(FilterRule {
+            op: Op::Not,
+            dst_ports: vec![PortRange::parse("80").unwrap()],
+            ..FilterRule::default()
+        });
+        assert!(f.matches(&tcp_443));
+        assert!(!f.matches(&tcp_80));
     }
 }

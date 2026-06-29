@@ -201,7 +201,7 @@ fn first_pass(
 
     let file = File::open(input)?;
     let mut reader =
-        LegacyPcapReader::new(BUF_SIZE, file).map_err(|e| SortError::Parse(format!("{e:?}")))?;
+        LegacyPcapReader::new(BUF_SIZE, file).map_err(|e| SortError::Parse(e.to_string()))?;
 
     let store = if on_disk {
         IndexStore::disk(&sidecar_path(input))?
@@ -283,9 +283,9 @@ fn first_pass_inner<R: std::io::Read>(
             Err(PcapError::Incomplete(_)) => {
                 reader
                     .refill()
-                    .map_err(|e| SortError::Parse(format!("{e:?}")))?;
+                    .map_err(|e| SortError::Parse(e.to_string()))?;
             }
-            Err(e) => return Err(SortError::Parse(format!("{e:?}"))),
+            Err(e) => return Err(SortError::Parse(e.to_string())),
         }
     }
 
