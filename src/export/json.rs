@@ -111,8 +111,7 @@ impl PacketSink for JsonSink {
             payload_encoding: encoding,
         };
 
-        serde_json::to_writer(&mut self.out, &json_rec)
-            .map_err(|e| ExportError::Json(e.to_string()))?;
+        serde_json::to_writer(&mut self.out, &json_rec).map_err(ExportError::from)?;
         self.out.write_all(b"\n")?;
         self.count += 1;
         Ok(())

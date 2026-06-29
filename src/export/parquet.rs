@@ -76,13 +76,10 @@ pub struct ParquetSink {
 impl ParquetSink {
     /// Create a new `ParquetSink` writing to `path`.
     pub fn create(path: &Path, compress_payload: bool) -> Result<Self, ExportError> {
-        let schema: Arc<Type> = Arc::new(
-            parse_message_type(SCHEMA_STR).map_err(|e| ExportError::Parquet(e.to_string()))?,
-        );
+        let schema: Arc<Type> =
+            Arc::new(parse_message_type(SCHEMA_STR).map_err(ExportError::from)?);
         let compression = if compress_payload {
-            Compression::ZSTD(
-                ZstdLevel::try_new(3).map_err(|e| ExportError::Parquet(e.to_string()))?,
-            )
+            Compression::ZSTD(ZstdLevel::try_new(3).map_err(ExportError::from)?)
         } else {
             Compression::SNAPPY
         };
@@ -92,8 +89,7 @@ impl ParquetSink {
                 .build(),
         );
         let file = std::fs::File::create(path)?;
-        let writer = SerializedFileWriter::new(file, schema, props)
-            .map_err(|e| ExportError::Parquet(e.to_string()))?;
+        let writer = SerializedFileWriter::new(file, schema, props).map_err(ExportError::from)?;
         Ok(Self {
             writer: Some(writer),
             buffer: Vec::with_capacity(BATCH_SIZE),
@@ -123,9 +119,7 @@ impl PacketSink for ParquetSink {
             }
         }
         if let Some(writer) = self.writer.take() {
-            writer
-                .close()
-                .map_err(|e| ExportError::Parquet(e.to_string()))?;
+            writer.close().map_err(ExportError::from)?;
         }
         Ok(self.count)
     }
@@ -136,9 +130,7 @@ fn write_row_group(
     writer: &mut SerializedFileWriter<std::fs::File>,
     chunk: &[PacketRecord],
 ) -> Result<(), ExportError> {
-    let mut rg = writer
-        .next_row_group()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?;
+    let mut rg = writer.next_row_group().map_err(ExportError::from)?;
 
     // ── timestamp_ns (REQUIRED INT64) ────────────────────────────────────────
     {
@@ -227,8 +219,7 @@ fn write_row_group(
         write_optional_binary(&mut rg, &payloads)?;
     }
 
-    rg.close()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?;
+    rg.close().map_err(ExportError::from)?;
     Ok(())
 }
 
@@ -240,17 +231,20 @@ fn write_required_i64(
 ) -> Result<(), ExportError> {
     let mut col = rg
         .next_column()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?
+        .map_err(ExportError::from)?
         .expect("column count mismatch");
     match col.untyped() {
         ColumnWriter::Int64ColumnWriter(w) => {
             w.write_batch(values, None, None)
-                .map_err(|e| ExportError::Parquet(e.to_string()))?;
+                .map_err(ExportError::from)?;
         }
-        _ => return Err(ExportError::Parquet("expected INT64 column".into())),
+        _ => {
+            return Err(
+                parquet::errors::ParquetError::General("expected INT64 column".into()).into(),
+            );
+        }
     }
-    col.close()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?;
+    col.close().map_err(ExportError::from)?;
     Ok(())
 }
 
@@ -260,17 +254,20 @@ fn write_required_i32(
 ) -> Result<(), ExportError> {
     let mut col = rg
         .next_column()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?
+        .map_err(ExportError::from)?
         .expect("column count mismatch");
     match col.untyped() {
         ColumnWriter::Int32ColumnWriter(w) => {
             w.write_batch(values, None, None)
-                .map_err(|e| ExportError::Parquet(e.to_string()))?;
+                .map_err(ExportError::from)?;
         }
-        _ => return Err(ExportError::Parquet("expected INT32 column".into())),
+        _ => {
+            return Err(
+                parquet::errors::ParquetError::General("expected INT32 column".into()).into(),
+            );
+        }
     }
-    col.close()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?;
+    col.close().map_err(ExportError::from)?;
     Ok(())
 }
 
@@ -286,17 +283,20 @@ fn write_optional_i32(
 
     let mut col = rg
         .next_column()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?
+        .map_err(ExportError::from)?
         .expect("column count mismatch");
     match col.untyped() {
         ColumnWriter::Int32ColumnWriter(w) => {
             w.write_batch(&non_null, Some(&def_levels), None)
-                .map_err(|e| ExportError::Parquet(e.to_string()))?;
+                .map_err(ExportError::from)?;
         }
-        _ => return Err(ExportError::Parquet("expected INT32 column".into())),
+        _ => {
+            return Err(
+                parquet::errors::ParquetError::General("expected INT32 column".into()).into(),
+            );
+        }
     }
-    col.close()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?;
+    col.close().map_err(ExportError::from)?;
     Ok(())
 }
 
@@ -312,17 +312,20 @@ fn write_optional_i64(
 
     let mut col = rg
         .next_column()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?
+        .map_err(ExportError::from)?
         .expect("column count mismatch");
     match col.untyped() {
         ColumnWriter::Int64ColumnWriter(w) => {
             w.write_batch(&non_null, Some(&def_levels), None)
-                .map_err(|e| ExportError::Parquet(e.to_string()))?;
+                .map_err(ExportError::from)?;
         }
-        _ => return Err(ExportError::Parquet("expected INT64 column".into())),
+        _ => {
+            return Err(
+                parquet::errors::ParquetError::General("expected INT64 column".into()).into(),
+            );
+        }
     }
-    col.close()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?;
+    col.close().map_err(ExportError::from)?;
     Ok(())
 }
 
@@ -342,17 +345,21 @@ fn write_optional_bytes(
 
     let mut col = rg
         .next_column()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?
+        .map_err(ExportError::from)?
         .expect("column count mismatch");
     match col.untyped() {
         ColumnWriter::ByteArrayColumnWriter(w) => {
             w.write_batch(&non_null, Some(&def_levels), None)
-                .map_err(|e| ExportError::Parquet(e.to_string()))?;
+                .map_err(ExportError::from)?;
         }
-        _ => return Err(ExportError::Parquet("expected BYTE_ARRAY column".into())),
+        _ => {
+            return Err(parquet::errors::ParquetError::General(
+                "expected BYTE_ARRAY column".into(),
+            )
+            .into());
+        }
     }
-    col.close()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?;
+    col.close().map_err(ExportError::from)?;
     Ok(())
 }
 
@@ -372,17 +379,21 @@ fn write_optional_binary(
 
     let mut col = rg
         .next_column()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?
+        .map_err(ExportError::from)?
         .expect("column count mismatch");
     match col.untyped() {
         ColumnWriter::ByteArrayColumnWriter(w) => {
             w.write_batch(&non_null, Some(&def_levels), None)
-                .map_err(|e| ExportError::Parquet(e.to_string()))?;
+                .map_err(ExportError::from)?;
         }
-        _ => return Err(ExportError::Parquet("expected BYTE_ARRAY column".into())),
+        _ => {
+            return Err(parquet::errors::ParquetError::General(
+                "expected BYTE_ARRAY column".into(),
+            )
+            .into());
+        }
     }
-    col.close()
-        .map_err(|e| ExportError::Parquet(e.to_string()))?;
+    col.close().map_err(ExportError::from)?;
     Ok(())
 }
 

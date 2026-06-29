@@ -111,12 +111,11 @@ pub fn sort_files(inputs: &[&Path], opts: &SortOptions) -> Result<SortReport, So
             }
         }
     }
+    // Sidecar cleanup is handled by SidecarGuard's Drop impl — when
+    // `headers_and_stores` goes out of scope (either via the early-return
+    // below or normal teardown after the merge loop consumes it), each
+    // on-disk store removes its own .idx file.
     if let Some(e) = first_err {
-        for (_, store) in &headers_and_stores {
-            if let Some(p) = store.sidecar_path() {
-                let _ = std::fs::remove_file(p);
-            }
-        }
         return Err(e);
     }
 
@@ -124,12 +123,6 @@ pub fn sort_files(inputs: &[&Path], opts: &SortOptions) -> Result<SortReport, So
     let reference_hdr = headers_and_stores[0].0;
     for (i, (hdr, _)) in headers_and_stores.iter().enumerate().skip(1) {
         if hdr.network != reference_hdr.network {
-            // Clean up any on-disk sidecar files before returning.
-            for (_, store) in &headers_and_stores {
-                if let Some(p) = store.sidecar_path() {
-                    let _ = std::fs::remove_file(p);
-                }
-            }
             return Err(SortError::IncompatibleLinkType {
                 path: inputs[i].to_owned(),
                 first: reference_hdr.network,
@@ -141,13 +134,9 @@ pub fn sort_files(inputs: &[&Path], opts: &SortOptions) -> Result<SortReport, So
     // ── Merge per-file indexes ────────────────────────────────────────────
     let mut merged: Vec<FilePacketIndex> = Vec::new();
     for (file_id, (_, store)) in headers_and_stores.into_iter().enumerate() {
-        let sidecar = store.sidecar_path().map(Path::to_owned);
         let entries = store.into_sorted()?;
         for entry in entries {
             merged.push(FilePacketIndex { entry, file_id });
-        }
-        if let Some(ref p) = sidecar {
-            let _ = std::fs::remove_file(p);
         }
     }
 
@@ -214,17 +203,15 @@ fn first_pass(
     let mut reader =
         LegacyPcapReader::new(BUF_SIZE, file).map_err(|e| SortError::Parse(format!("{e:?}")))?;
 
-    let sidecar = on_disk.then(|| sidecar_path(input));
-    let store = match &sidecar {
-        Some(p) => IndexStore::disk(p)?,
-        None => IndexStore::memory(),
+    let store = if on_disk {
+        IndexStore::disk(&sidecar_path(input))?
+    } else {
+        IndexStore::memory()
     };
 
-    first_pass_inner(&mut reader, store, filter, bpf).inspect_err(|_| {
-        if let Some(p) = &sidecar {
-            let _ = std::fs::remove_file(p);
-        }
-    })
+    // On error, the IndexStore is dropped inside first_pass_inner — the
+    // SidecarGuard's Drop impl removes any partial on-disk sidecar.
+    first_pass_inner(&mut reader, store, filter, bpf)
 }
 
 fn first_pass_inner<R: std::io::Read>(

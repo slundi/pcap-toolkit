@@ -47,13 +47,13 @@ pub enum ExportError {
     Parse(String),
 
     #[error("JSON serialisation error: {0}")]
-    Json(String),
+    Json(#[from] serde_json::Error),
 
     #[error("Parquet error: {0}")]
-    Parquet(String),
+    Parquet(#[from] parquet::errors::ParquetError),
 
     #[error("Avro error: {0}")]
-    Avro(String),
+    Avro(#[from] apache_avro::Error),
 
     #[error("unsupported export format '{0}': expected json, parquet, or avro")]
     UnknownFormat(String),
@@ -73,6 +73,11 @@ pub enum ReplayError {
 
     #[error("unknown interface '{0}': not found in /sys/class/net/")]
     UnknownInterface(String),
+
+    #[error(
+        "invalid interface name '{0}': only ASCII letters, digits, '.', '_', and '-' are allowed"
+    )]
+    InvalidInterface(String),
 
     #[error("PCAP parse error: {0}")]
     PcapParse(String),

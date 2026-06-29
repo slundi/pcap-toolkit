@@ -122,21 +122,19 @@ impl PacketSink for AvroSink {
         };
         self.writer
             .append_ser(avro_rec)
-            .map_err(|e| ExportError::Avro(e.to_string()))?;
+            .map_err(ExportError::from)?;
         self.count += 1;
         Ok(())
     }
 
     fn close(&mut self) -> Result<u64, ExportError> {
-        self.writer
-            .flush()
-            .map_err(|e| ExportError::Avro(e.to_string()))?;
+        self.writer.flush().map_err(ExportError::from)?;
         Ok(self.count)
     }
 }
 
 /// Return a pretty-printed version of the Avro schema (for diagnostics).
 pub fn schema_json() -> Result<String, ExportError> {
-    let schema = Schema::parse_str(AVRO_SCHEMA).map_err(|e| ExportError::Avro(e.to_string()))?;
-    serde_json::to_string_pretty(&schema).map_err(|e| ExportError::Avro(e.to_string()))
+    let schema = Schema::parse_str(AVRO_SCHEMA).map_err(ExportError::from)?;
+    serde_json::to_string_pretty(&schema).map_err(ExportError::from)
 }
