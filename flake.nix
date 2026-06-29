@@ -73,6 +73,8 @@
           git-cliff # Changelog generator from conventional commits
           mold # Fast linker (referenced in .cargo/config.toml)
           nil # Nix language server (referenced in .vscode/settings.json)
+          jq # JSON processor (used by the Codeberg release recipe in the justfile)
+          zip # Used by the Codeberg release recipe to package windows artifacts
           custom-codium
         ];
 

@@ -30,6 +30,9 @@ target/
 # Coverage
 lcov.info
 
+# Release artifacts
+dist/
+
 # Nix
 .direnv/
 result
