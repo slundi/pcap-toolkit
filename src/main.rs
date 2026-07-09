@@ -46,8 +46,12 @@ fn cmd_info(args: &cli::InfoArgs) -> Result<()> {
 
 fn cmd_stats(args: &cli::StatsArgs) -> Result<()> {
     let info = collect_info(&args.input, args.unidirectional)?;
-    print_info(&info);
-    print_flows(&info);
+    if args.json {
+        println!("{}", stats_to_json(&info)?);
+    } else {
+        print_info(&info);
+        print_flows(&info);
+    }
     Ok(())
 }
 
@@ -116,6 +120,74 @@ fn print_flows(info: &CaptureInfo) {
             f.flow_id,
         );
     }
+}
+
+/// JSON view of a single flow. Mirrors the columns of the text table but with
+/// `flow_id` as a numeric `u64` (matching the `export` JSON convention) rather
+/// than hex.
+#[derive(serde::Serialize)]
+struct FlowJson {
+    src_ip: String,
+    dst_ip: String,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    packets: u64,
+    bytes: u64,
+    flow_id: u64,
+}
+
+/// JSON view of an entire capture's statistics.
+#[derive(serde::Serialize)]
+struct StatsJson {
+    packets: u64,
+    bytes: u64,
+    /// RFC 3339 timestamp of the first packet, or `null` for an empty capture.
+    start: Option<String>,
+    /// RFC 3339 timestamp of the last packet, or `null` for an empty capture.
+    end: Option<String>,
+    /// Capture duration in whole seconds, or `null` if fewer than two packets.
+    duration_secs: Option<i64>,
+    unique_src_ips: usize,
+    unique_dst_ips: usize,
+    flow_count: usize,
+    flows: Vec<FlowJson>,
+}
+
+/// Render a [`CaptureInfo`] as pretty-printed JSON.
+///
+/// Flows are ordered by descending byte count to match the text table.
+fn stats_to_json(info: &CaptureInfo) -> Result<String> {
+    let mut flows = info.flows.clone();
+    flows.sort_by_key(|f| std::cmp::Reverse(f.bytes));
+
+    let flows_json = flows
+        .into_iter()
+        .map(|f| FlowJson {
+            src_ip: f.key.src_ip.to_string(),
+            dst_ip: f.key.dst_ip.to_string(),
+            src_port: f.key.src_port,
+            dst_port: f.key.dst_port,
+            protocol: f.key.protocol,
+            packets: f.packets,
+            bytes: f.bytes,
+            flow_id: f.flow_id,
+        })
+        .collect();
+
+    let view = StatsJson {
+        packets: info.total_packets,
+        bytes: info.total_bytes,
+        start: info.start.map(|t| t.to_rfc3339()),
+        end: info.end.map(|t| t.to_rfc3339()),
+        duration_secs: info.duration().map(|d| d.num_seconds()),
+        unique_src_ips: info.unique_src_ips.len(),
+        unique_dst_ips: info.unique_dst_ips.len(),
+        flow_count: info.flow_count(),
+        flows: flows_json,
+    };
+
+    Ok(serde_json::to_string_pretty(&view)?)
 }
 
 fn cmd_sort(args: &cli::SortArgs, config: &Config) -> Result<()> {
@@ -624,7 +696,97 @@ fn format_duration(d: chrono::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pcap_toolkit::flow::FlowKey;
+    use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;
+
+    // ── stats --json rendering tests ──────────────────────────────────────────
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn test_stats_json_empty_capture() {
+        let info = StatsCollector::new(false).finish();
+        let json = stats_to_json(&info).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(v["packets"], 0);
+        assert_eq!(v["bytes"], 0);
+        assert!(v["start"].is_null());
+        assert!(v["end"].is_null());
+        assert!(v["duration_secs"].is_null());
+        assert_eq!(v["unique_src_ips"], 0);
+        assert_eq!(v["unique_dst_ips"], 0);
+        assert_eq!(v["flow_count"], 0);
+        assert!(v["flows"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_stats_json_aggregate_fields() {
+        let mut col = StatsCollector::new(false);
+        let k = FlowKey::new(v4(10, 0, 0, 1), v4(10, 0, 0, 2), 1000, 443, 6);
+        col.feed(1_000_000_000, 100, Some(k.clone()));
+        col.feed(3_000_000_000, 200, Some(k));
+        let info = col.finish();
+
+        let json = stats_to_json(&info).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(v["packets"], 2);
+        assert_eq!(v["bytes"], 300);
+        assert_eq!(v["unique_src_ips"], 1);
+        assert_eq!(v["unique_dst_ips"], 1);
+        assert_eq!(v["flow_count"], 1);
+        // Two packets, 2s apart.
+        assert_eq!(v["duration_secs"], 2);
+        assert!(v["start"].as_str().unwrap().contains("1970"));
+        assert!(v["end"].is_string());
+    }
+
+    #[test]
+    fn test_stats_json_flow_details() {
+        let mut col = StatsCollector::new(false);
+        let k = FlowKey::new(v4(192, 168, 1, 1), v4(8, 8, 8, 8), 5000, 53, 17);
+        let expected_flow_id = k.flow_id(false);
+        col.feed(1_000_000_000, 60, Some(k));
+        let info = col.finish();
+
+        let json = stats_to_json(&info).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        let flow = &v["flows"][0];
+        assert_eq!(flow["src_ip"], "192.168.1.1");
+        assert_eq!(flow["dst_ip"], "8.8.8.8");
+        assert_eq!(flow["src_port"], 5000);
+        assert_eq!(flow["dst_port"], 53);
+        assert_eq!(flow["protocol"], 17);
+        assert_eq!(flow["packets"], 1);
+        assert_eq!(flow["bytes"], 60);
+        // flow_id is emitted as a numeric u64 (not hex), matching export JSON.
+        assert!(flow["flow_id"].is_u64());
+        assert_eq!(flow["flow_id"].as_u64().unwrap(), expected_flow_id);
+    }
+
+    #[test]
+    fn test_stats_json_flows_sorted_by_bytes_desc() {
+        let mut col = StatsCollector::new(false);
+        // Small flow first, large flow second — output must list large first.
+        let small = FlowKey::new(v4(10, 0, 0, 1), v4(10, 0, 0, 2), 1111, 80, 6);
+        let large = FlowKey::new(v4(10, 0, 0, 3), v4(10, 0, 0, 4), 2222, 443, 6);
+        col.feed(1_000_000_000, 50, Some(small));
+        col.feed(2_000_000_000, 5000, Some(large));
+        let info = col.finish();
+
+        let json = stats_to_json(&info).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        let flows = v["flows"].as_array().unwrap();
+        assert_eq!(flows.len(), 2);
+        assert_eq!(flows[0]["bytes"], 5000);
+        assert_eq!(flows[1]["bytes"], 50);
+    }
 
     // ── Minimal arg constructors ──────────────────────────────────────────────
 

@@ -99,6 +99,9 @@ pcap-toolkit info traffic.pcap
 # Show per-flow statistics
 pcap-toolkit stats traffic.pcap
 
+# Emit the same statistics as machine-readable JSON
+pcap-toolkit stats --json traffic.pcap
+
 # Filter to HTTPS traffic from a subnet and export to Parquet
 pcap-toolkit export --proto tcp --dst-port 443 --src-ip 10.0.0.0/8 \
   --format parquet --output out.parquet traffic.pcap

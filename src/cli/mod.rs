@@ -49,6 +49,8 @@ pub struct StatsArgs {
     pub input: PathBuf,
     /// Use unidirectional flow IDs (default: bidirectional).
     pub unidirectional: bool,
+    /// Emit machine-readable JSON instead of the human-readable table.
+    pub json: bool,
 }
 
 /// Arguments for the `sort` subcommand.
@@ -137,8 +139,12 @@ fn stats_cmd() -> impl Parser<Command> {
         .short('u')
         .help("Use unidirectional flow IDs instead of bidirectional")
         .switch();
+    let json = long("json")
+        .help("Emit machine-readable JSON instead of the human-readable table")
+        .switch();
     construct!(StatsArgs {
         unidirectional,
+        json,
         input,
     })
     .to_options()
