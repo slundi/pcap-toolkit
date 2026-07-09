@@ -26,16 +26,21 @@ footer = ""
 conventional_commits = true
 filter_unconventional = true
 split_commits = false
+# Only user-facing changes appear in the changelog.
+# Internal commit types (refactor, test, chore, ci, build, style) are skipped
+# because they don't affect end users — reviewers can consult git log for those.
 commit_parsers = [
-  { message = "^feat",               group = "Features"      },
-  { message = "^fix",                group = "Bug Fixes"     },
-  { message = "^doc",                group = "Documentation" },
-  { message = "^perf",               group = "Performance"   },
-  { message = "^refactor",           group = "Refactor"      },
-  { message = "^test",               group = "Testing"       },
-  { message = "^chore\\(release\\)", skip  = true            },
-  { message = "^chore",              group = "Miscellaneous" },
-  { body    = ".*security",          group = "Security"      },
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^doc", group = "Documentation" },
+  { message = "^perf", group = "Performance" },
+  { body = ".*security", group = "Security" },
+  { message = "^refactor", skip = true }, # internal code restructuring, no user impact
+  { message = "^test", skip = true }, # test-only changes
+  { message = "^chore", skip = true }, # maintenance (deps, tooling, formatting)
+  { message = "^ci", skip = true }, # CI/CD pipeline changes
+  { message = "^build", skip = true }, # build system changes
+  { message = "^style", skip = true }, # whitespace/formatting only
 ]
 tag_pattern = "v[0-9]*"
 topo_order = false
