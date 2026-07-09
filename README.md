@@ -68,6 +68,7 @@ Sorted output can be time-sliced into separate files (hourly, daily, or any cust
 Applied during the second pass, before writing or replaying:
 
 - **Payload truncation** — `--max-payload-bytes N`: keep only the first N bytes of the application payload, preserving all Ethernet / IP / transport headers. Shrinks storage while retaining full header fidelity for analysis.
+- **MTU truncation** — `--mtu-trunc N`: cap every packet so that Layer 3 and above (the IP packet) is at most N bytes; the Layer 2 (Ethernet / VLAN) header is not counted. Equivalent to tcprewrite's `--mtu-trunc`. Unlike `--max-payload-bytes` this is a hard cap that may cut into the transport payload. IP/UDP length fields and checksums are recomputed.
 - **Timestamp shifting** — provide a target start datetime (ms epoch); all timestamps are shifted by the computed delta. Useful for re-anchoring old captures to a lab timeline.
 - **IP address mapping** — replace specific IPs with others (`--replace-ip 10.0.0.1=192.168.1.1`) or via a TOML mapping table. Checksums are automatically recomputed after any header change.
 

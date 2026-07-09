@@ -142,6 +142,8 @@ pub struct ProtocolTruncationConfig {
 pub struct TransformConfig {
     /// Global maximum payload bytes (per-protocol rules take precedence when set).
     pub max_payload_bytes: Option<u32>,
+    /// Truncate packets so Layer 3 and above is at most this many bytes (tcprewrite `--mtu-trunc`).
+    pub mtu_trunc: Option<u32>,
     /// Shift all timestamps so the capture starts at this datetime (RFC 3339 or Unix epoch seconds).
     pub timestamp_start: Option<String>,
     /// IP address replacement rules as `"OLD_IP=NEW_IP"` strings.
@@ -360,6 +362,7 @@ impl<'de> Deserialize<'de> for TransformConfig {
     fn deserialize(value: &mut Value<'de>) -> Result<Self, DeserError> {
         let mut th = TableHelper::new(value)?;
         let max_payload_bytes = th.optional::<u32>("max_payload_bytes");
+        let mtu_trunc = th.optional::<u32>("mtu_trunc");
         let timestamp_start = th.optional::<String>("timestamp_start");
         let replace_ip = th.optional::<Vec<String>>("replace_ip").unwrap_or_default();
         let truncate_by_proto = th
@@ -368,6 +371,7 @@ impl<'de> Deserialize<'de> for TransformConfig {
         th.finalize(None)?;
         Ok(TransformConfig {
             max_payload_bytes,
+            mtu_trunc,
             timestamp_start,
             replace_ip,
             truncate_by_proto,
@@ -560,12 +564,14 @@ bogus_key = "oops"
         let toml = r#"
 [transform]
 max_payload_bytes = 256
+mtu_trunc = 1500
 timestamp_start = "2024-01-01T00:00:00Z"
 replace_ip = ["10.0.0.1=192.168.1.1"]
 "#;
         let mut value = toml_span::parse(toml).unwrap();
         let config = Config::deserialize(&mut value).unwrap();
         assert_eq!(config.transform.max_payload_bytes, Some(256));
+        assert_eq!(config.transform.mtu_trunc, Some(1500));
         assert_eq!(
             config.transform.timestamp_start.as_deref(),
             Some("2024-01-01T00:00:00Z")

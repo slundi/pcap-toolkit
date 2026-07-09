@@ -102,6 +102,8 @@ pub struct SortArgs {
     // ── Transform flags ───────────────────────────────────────────────────────
     /// Truncate each packet's payload to at most N bytes (headers preserved).
     pub max_payload_bytes: Option<u32>,
+    /// Truncate each packet so Layer 3 and above is at most N bytes (tcprewrite --mtu-trunc).
+    pub mtu_trunc: Option<u32>,
     /// Shift all timestamps so the capture starts at this datetime.
     pub timestamp_start: Option<String>,
     /// Replace an IP address: `OLD_IP=NEW_IP`. Repeatable.
@@ -237,6 +239,10 @@ fn sort_cmd() -> impl Parser<Command> {
         .help("Truncate each packet's payload to at most N bytes (headers preserved)")
         .argument::<u32>("BYTES")
         .optional();
+    let mtu_trunc = long("mtu-trunc")
+        .help("Truncate packets so Layer 3 and above is at most N bytes (L2 header excluded)")
+        .argument::<u32>("BYTES")
+        .optional();
     let timestamp_start = long("timestamp-start")
         .help("Shift all timestamps so the capture starts at this datetime (RFC 3339 or Unix epoch seconds)")
         .argument::<String>("DATETIME")
@@ -268,6 +274,7 @@ fn sort_cmd() -> impl Parser<Command> {
         filter_expr,
         min_flow_packets,
         max_payload_bytes,
+        mtu_trunc,
         timestamp_start,
         replace_ip,
         inputs,

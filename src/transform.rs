@@ -139,6 +139,13 @@ pub struct TransformOptions {
     ///
     /// Overridden per-protocol by [`proto_truncation`](Self::proto_truncation).
     pub max_payload_bytes: Option<u32>,
+    /// Truncate each packet so that everything from Layer 3 (the IP header)
+    /// onward is at most this many bytes — the equivalent of tcprewrite's
+    /// `--mtu-trunc`. The Layer 2 (Ethernet + optional VLAN) header is **not**
+    /// counted. Unlike [`max_payload_bytes`](Self::max_payload_bytes) this is a
+    /// hard cap on the IP packet and may cut into the transport payload, though
+    /// never into the fixed IP header.
+    pub mtu_trunc: Option<u32>,
     /// When set, all timestamps are shifted so the first sorted packet starts
     /// at exactly this nanosecond epoch value.
     ///
@@ -165,6 +172,7 @@ impl TransformOptions {
     /// Returns `true` when no transformations are configured.
     pub fn is_empty(&self) -> bool {
         self.max_payload_bytes.is_none()
+            && self.mtu_trunc.is_none()
             && self.timestamp_start_ns.is_none()
             && self.ip_map.is_empty()
             && self.proto_truncation.is_empty()
@@ -234,7 +242,14 @@ pub fn apply(
         None => (origlen, false),
     };
 
-    if ip_changed || truncated {
+    // MTU truncation is a hard cap on the IP packet size, applied after the
+    // payload-level truncation above (both only ever shrink the packet).
+    let (new_origlen, mtu_truncated) = match opts.mtu_trunc {
+        Some(mtu) => do_mtu_trunc(data, mtu, new_origlen),
+        None => (new_origlen, false),
+    };
+
+    if ip_changed || truncated || mtu_truncated {
         recalculate_checksums(data);
     }
 
@@ -702,6 +717,91 @@ fn do_truncate(data: &mut Vec<u8>, max_bytes: u32, origlen: u32) -> (u32, bool) 
 
     // Update UDP length. TCP has no explicit payload length field.
     if proto == PROTO_UDP {
+        let new_udp_len = (new_len - transport_start) as u16;
+        data[transport_start + 4..transport_start + 6].copy_from_slice(&new_udp_len.to_be_bytes());
+    }
+
+    (new_len as u32, true)
+}
+
+/// Locate the transport header of an IPv4/IPv6 frame.
+///
+/// Returns `(proto, transport_start)`, walking IPv6 extension headers. Returns
+/// `None` when the header is too short or the extension chain is unparsable.
+fn transport_location(data: &[u8], ip_off: usize, et: u16) -> Option<(u8, usize)> {
+    match et {
+        ET_IPV4 => {
+            if data.len() < ip_off + 20 {
+                return None;
+            }
+            let ihl = ((data[ip_off] & 0x0F) as usize) * 4;
+            if ihl < 20 {
+                return None;
+            }
+            Some((data[ip_off + 9], ip_off + ihl))
+        }
+        ET_IPV6 => {
+            if data.len() < ip_off + 40 {
+                return None;
+            }
+            walk_ipv6_extension_headers(data, ip_off)
+        }
+        _ => None,
+    }
+}
+
+/// Truncate the packet so everything from Layer 3 onward is at most `mtu` bytes.
+///
+/// This mirrors tcprewrite's `--mtu-trunc`: the Layer 2 (Ethernet + optional
+/// 802.1Q VLAN) header is **not** counted toward the MTU — only Layer 3 and
+/// above. Unlike [`do_truncate`], which caps the application payload while
+/// always preserving the transport header, `--mtu-trunc` is a hard cap on the
+/// IP packet and may cut into the transport payload. The fixed IP header is
+/// always preserved so the rewritten length fields and checksums stay coherent;
+/// MTUs smaller than the fixed IP header are ignored.
+///
+/// Returns `(new_origlen, did_truncate)`.
+fn do_mtu_trunc(data: &mut Vec<u8>, mtu: u32, origlen: u32) -> (u32, bool) {
+    let Some((ip_off, et)) = find_ip(data) else {
+        return (origlen, false);
+    };
+
+    // `min_l3` — the fixed IP header must survive. `l3_ceiling` clamps the cut
+    // so the rewritten 16-bit length field can never wrap.
+    let (min_l3, l3_ceiling) = match et {
+        ET_IPV4 => (20usize, u16::MAX as usize), // IPv4 total-length field
+        ET_IPV6 => (40usize, 40 + u16::MAX as usize), // fixed header + payload-length
+        _ => return (origlen, false),
+    };
+    let mtu = mtu as usize;
+    if mtu < min_l3 {
+        return (origlen, false);
+    }
+
+    let max_total = ip_off + mtu.min(l3_ceiling);
+    if data.len() <= max_total {
+        return (origlen, false); // already within the MTU
+    }
+
+    data.truncate(max_total);
+    let new_len = data.len();
+
+    // Rewrite the IP length field to match the new frame size.
+    if et == ET_IPV4 {
+        let new_ip_total = (new_len - ip_off) as u16;
+        data[ip_off + 2..ip_off + 4].copy_from_slice(&new_ip_total.to_be_bytes());
+    } else {
+        let new_plen = (new_len - ip_off - 40) as u16;
+        data[ip_off + 4..ip_off + 6].copy_from_slice(&new_plen.to_be_bytes());
+    }
+
+    // Update the UDP length field when the packet is UDP and its 8-byte header
+    // fully survived the cut. TCP has no explicit length field; a partially
+    // truncated transport header is left untouched (the checksum pass skips it).
+    if let Some((proto, transport_start)) = transport_location(data, ip_off, et)
+        && proto == PROTO_UDP
+        && new_len >= transport_start + 8
+    {
         let new_udp_len = (new_len - transport_start) as u16;
         data[transport_start + 4..transport_start + 6].copy_from_slice(&new_udp_len.to_be_bytes());
     }
@@ -1437,6 +1537,156 @@ mod tests {
         apply(&mut data, 0, 0, orig, &opts);
         // Ethernet(14) + IPv4(20) + UDP(8) = 42
         assert_eq!(data.len(), 42);
+    }
+
+    // ── MTU truncation (tcprewrite --mtu-trunc) ───────────────────────────────
+
+    #[test]
+    fn test_mtu_trunc_udp_updates_lengths() {
+        let payload = vec![0xBB; 100];
+        let mut data = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 200, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            mtu_trunc: Some(40),
+            ..Default::default()
+        };
+        let (_, new_caplen, new_origlen) = apply(&mut data, 0, 0, orig, &opts);
+
+        // L2 header (14) is excluded from the MTU: frame = Ethernet(14) + 40.
+        assert_eq!(data.len(), 54);
+        assert_eq!(new_caplen, 54);
+        assert_eq!(new_origlen, 54);
+
+        // IPv4 total length = the MTU (Layer 3 and above).
+        let ip_total = u16::from_be_bytes([data[16], data[17]]);
+        assert_eq!(ip_total, 40, "IPv4 total length must equal the MTU");
+
+        // UDP length updated: transport_start=34, 54-34 = 20 (8 header + 12 data).
+        let udp_len = u16::from_be_bytes([data[38], data[39]]);
+        assert_eq!(udp_len, 20, "UDP length not updated");
+    }
+
+    #[test]
+    fn test_mtu_trunc_excludes_l2_header() {
+        // The defining difference from --max-len: the MTU counts only Layer 3+,
+        // so a truncated frame is always exactly 14 (Ethernet) + MTU bytes.
+        let payload = vec![0xAA; 200];
+        let mut data = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 200, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            mtu_trunc: Some(68),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        assert_eq!(data.len(), 14 + 68);
+    }
+
+    #[test]
+    fn test_mtu_trunc_tcp_updates_ip_length() {
+        let payload = vec![0xCC; 50];
+        let mut data = eth_ipv4_tcp([1, 2, 3, 4], [5, 6, 7, 8], 100, 443, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            mtu_trunc: Some(50),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+
+        // Ethernet(14) + MTU(50) = 64. IPv4 total = 50.
+        assert_eq!(data.len(), 64);
+        let ip_total = u16::from_be_bytes([data[16], data[17]]);
+        assert_eq!(ip_total, 50);
+    }
+
+    #[test]
+    fn test_mtu_trunc_noop_when_within_mtu() {
+        let payload = vec![0xAA; 5];
+        let mut data = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 200, &payload);
+        let original = data.clone();
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            mtu_trunc: Some(1500),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        assert_eq!(data, original);
+    }
+
+    #[test]
+    fn test_mtu_trunc_ignored_below_ip_header() {
+        // An MTU smaller than the fixed IPv4 header would cut into the header
+        // itself; the transform must refuse and leave the packet untouched.
+        let payload = vec![0xEE; 100];
+        let mut data = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 200, &payload);
+        let original = data.clone();
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            mtu_trunc: Some(10),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        assert_eq!(data, original);
+    }
+
+    #[test]
+    fn test_mtu_trunc_ipv6_udp_updates_lengths() {
+        let src = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let payload = vec![0xDD; 100];
+        let mut data = eth_ipv6_udp(src, dst, 1234, 53, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            mtu_trunc: Some(60),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+
+        // Ethernet(14) + MTU(60) = 74.
+        assert_eq!(data.len(), 74);
+        // IPv6 payload length (offset 18-20 within frame) = 60 - 40 = 20.
+        let plen = u16::from_be_bytes([data[18], data[19]]);
+        assert_eq!(plen, 20, "IPv6 payload length not updated");
+        // UDP length: transport_start=54, 74-54 = 20.
+        let udp_len = u16::from_be_bytes([data[58], data[59]]);
+        assert_eq!(udp_len, 20, "UDP length not updated");
+    }
+
+    #[test]
+    fn test_mtu_trunc_checksums_valid() {
+        let payload = vec![0xDE; 200];
+        let mut data = eth_ipv4_udp([10, 0, 0, 1], [8, 8, 8, 8], 1234, 53, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            mtu_trunc: Some(60),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        // Valid IPv4 header: one's-complement sum of all words = 0x0000.
+        let ihl = ((data[14] & 0x0F) * 4) as usize;
+        assert_eq!(
+            internet_checksum(&data[14..14 + ihl]),
+            0x0000,
+            "IPv4 header checksum must be valid after MTU truncation"
+        );
+    }
+
+    #[test]
+    fn test_mtu_trunc_combined_with_payload_truncation() {
+        // The smaller of the two limits wins. Here --max-payload-bytes(30) keeps
+        // 30 payload bytes (frame 72), then --mtu-trunc(40) caps L3 to 40 (frame
+        // 54). The MTU cap is the tighter one and must apply.
+        let payload = vec![0xAB; 100];
+        let mut data = eth_ipv4_udp([1, 2, 3, 4], [5, 6, 7, 8], 100, 200, &payload);
+        let orig = data.len() as u32;
+        let opts = TransformOptions {
+            max_payload_bytes: Some(30),
+            mtu_trunc: Some(40),
+            ..Default::default()
+        };
+        apply(&mut data, 0, 0, orig, &opts);
+        assert_eq!(data.len(), 54);
+        let ip_total = u16::from_be_bytes([data[16], data[17]]);
+        assert_eq!(ip_total, 40);
     }
 
     // ── Per-protocol truncation ───────────────────────────────────────────────

@@ -102,6 +102,13 @@ dst_ip = ["10.99.0.0/16"]
 # Per-protocol rules below take precedence over this global limit.
 max_payload_bytes = 512
 
+# MTU truncation (tcprewrite --mtu-trunc): cap each packet so Layer 3 and above
+# is at most N bytes. The Layer 2 (Ethernet/VLAN) header is NOT counted. Unlike
+# max_payload_bytes this is a hard cap that may cut into the transport payload;
+# the fixed IP header is always preserved. IP/UDP lengths and checksums are
+# recomputed.
+# mtu_trunc = 1500
+
 # Shift all timestamps so the capture starts at this datetime.
 # Accepts RFC 3339 or millisecond epoch integer.
 # timestamp_start = "2024-06-01T00:00:00Z"

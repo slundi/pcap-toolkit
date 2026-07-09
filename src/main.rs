@@ -328,11 +328,13 @@ fn build_filter<A: FilterArgs>(args: &A) -> Result<Filter> {
 /// CLI flags take precedence over config values. Per-protocol truncation rules
 /// are TOML-only (no CLI equivalent).
 fn build_transform(args: &cli::SortArgs, cfg: &TransformConfig) -> Result<TransformOptions> {
-    // CLI --max-payload-bytes takes precedence over config value.
+    // CLI flags take precedence over config values.
     let max_payload_bytes = args.max_payload_bytes.or(cfg.max_payload_bytes);
+    let mtu_trunc = args.mtu_trunc.or(cfg.mtu_trunc);
 
     let mut t = TransformOptions {
         max_payload_bytes,
+        mtu_trunc,
         ..TransformOptions::default()
     };
 
@@ -641,6 +643,7 @@ mod tests {
             filter_expr: None,
             min_flow_packets: None,
             max_payload_bytes: None,
+            mtu_trunc: None,
             timestamp_start: None,
             replace_ip: vec![],
         }
