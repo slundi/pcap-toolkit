@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use pcap_toolkit::bpf;
 use pcap_toolkit::export::{
-    ExportFormat, ExportOptions, MultiExportOptions, OutputTarget, export_file, export_multi,
+    ExportFormat, ExportOptions, MultiExportOptions, OutputDest, OutputTarget, export_file,
+    export_multi,
 };
 use pcap_toolkit::filter::{Filter, FilterRule, IpNet, Op, PortRange};
 use pcap_toolkit::flow::FlowKey;
@@ -1342,13 +1343,13 @@ fn test_export_multi_fanout_writes_correct_formats() {
         targets: vec![
             // First target: format supplied explicitly (mirrors --format on the CLI).
             OutputTarget {
-                path: out_json.clone(),
+                dest: OutputDest::File(out_json.clone()),
                 format: Some(ExportFormat::Json),
                 compress_payload: false,
             },
             // Second target: format inferred from .parquet extension.
             OutputTarget {
-                path: out_parquet.clone(),
+                dest: OutputDest::File(out_parquet.clone()),
                 format: None,
                 compress_payload: false,
             },

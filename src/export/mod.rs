@@ -81,12 +81,31 @@ impl ExportFormat {
     }
 }
 
+/// Destination for a single export target.
+#[derive(Debug, Clone)]
+pub enum OutputDest {
+    /// A file on disk. The extension is used for format auto-detection.
+    File(std::path::PathBuf),
+    /// Standard output. Only the JSON format is supported (see [`build_sink`]).
+    Stdout,
+}
+
+impl std::fmt::Display for OutputDest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OutputDest::File(path) => write!(f, "{}", path.display()),
+            OutputDest::Stdout => f.write_str("<stdout>"),
+        }
+    }
+}
+
 /// A single output target for fan-out export.
 #[derive(Debug)]
 pub struct OutputTarget {
-    /// Destination file path.
-    pub path: std::path::PathBuf,
-    /// Output format. When `None`, inferred from the file extension.
+    /// Where the records are written.
+    pub dest: OutputDest,
+    /// Output format. When `None`, inferred from the file extension (files) or
+    /// defaulted to JSON (STDOUT).
     pub format: Option<ExportFormat>,
     /// Apply Zstd compression to payload bytes.
     pub compress_payload: bool,
@@ -133,10 +152,10 @@ pub struct ExportOptions {
 /// Summary returned by [`export_file`] on success.
 #[derive(Debug)]
 pub struct ExportReport {
-    /// Total packets written to the output file.
+    /// Total packets written to the output.
     pub packets_written: u64,
-    /// Path of the output file.
-    pub output_path: std::path::PathBuf,
+    /// Where the records were written.
+    pub dest: OutputDest,
 }
 
 /// A single packet record ready for serialisation.
@@ -192,7 +211,7 @@ pub fn export_multi(
     // Build and validate all sinks up front so we fail fast on bad paths/formats.
     struct SinkState {
         sink: Box<dyn PacketSink>,
-        path: std::path::PathBuf,
+        dest: OutputDest,
     }
     let mut sinks: Vec<SinkState> = opts
         .targets
@@ -200,7 +219,7 @@ pub fn export_multi(
         .map(|t| {
             Ok(SinkState {
                 sink: build_sink(t)?,
-                path: t.path.clone(),
+                dest: t.dest.clone(),
             })
         })
         .collect::<Result<Vec<_>, ExportError>>()?;
@@ -256,7 +275,7 @@ pub fn export_multi(
             let packets_written = state.sink.close()?;
             Ok(ExportReport {
                 packets_written,
-                output_path: state.path,
+                dest: state.dest,
             })
         })
         .collect::<Result<Vec<_>, ExportError>>()?;
@@ -288,7 +307,7 @@ pub fn export_file(input: &Path, opts: &ExportOptions) -> Result<ExportReport, E
 
     let multi_opts = MultiExportOptions {
         targets: vec![OutputTarget {
-            path: opts.output.clone(),
+            dest: OutputDest::File(opts.output.clone()),
             format: Some(format),
             compress_payload: opts.compress_payload,
         }],
@@ -303,32 +322,40 @@ pub fn export_file(input: &Path, opts: &ExportOptions) -> Result<ExportReport, E
 // ── Sink construction ────────────────────────────────────────────────────────
 
 fn build_sink(target: &OutputTarget) -> Result<Box<dyn PacketSink>, ExportError> {
+    let path = match &target.dest {
+        OutputDest::File(path) => path,
+        OutputDest::Stdout => {
+            // STDOUT is JSON-only: it is a text stream (Base64-encoded payloads
+            // keep it terminal-safe), and parquet/avro need a seekable file plus,
+            // for avro, a companion `.avsc` sidecar with no STDOUT equivalent.
+            let format = target.format.unwrap_or(ExportFormat::Json);
+            if format != ExportFormat::Json {
+                return Err(ExportError::StdoutNotJson);
+            }
+            return Ok(Box::new(json::JsonSink::from_writer(
+                std::io::stdout(),
+                target.compress_payload,
+            )));
+        }
+    };
+
     let format = target
         .format
-        .or_else(|| ExportFormat::from_extension(&target.path))
+        .or_else(|| ExportFormat::from_extension(path))
         .ok_or_else(|| {
             ExportError::UnknownFormat(
-                target
-                    .path
-                    .extension()
+                path.extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("<none>")
                     .to_owned(),
             )
         })?;
     let sink: Box<dyn PacketSink> = match format {
-        ExportFormat::Json => Box::new(json::JsonSink::create(
-            &target.path,
-            target.compress_payload,
-        )?),
-        ExportFormat::Parquet => Box::new(parquet::ParquetSink::create(
-            &target.path,
-            target.compress_payload,
-        )?),
-        ExportFormat::Avro => Box::new(avro::AvroSink::create(
-            &target.path,
-            target.compress_payload,
-        )?),
+        ExportFormat::Json => Box::new(json::JsonSink::create(path, target.compress_payload)?),
+        ExportFormat::Parquet => {
+            Box::new(parquet::ParquetSink::create(path, target.compress_payload)?)
+        }
+        ExportFormat::Avro => Box::new(avro::AvroSink::create(path, target.compress_payload)?),
     };
     Ok(sink)
 }
@@ -471,6 +498,89 @@ mod tests {
         assert_eq!(rec.protocol, None);
         assert_eq!(rec.flow_id, None);
         assert_eq!(rec.tcp_flags, None);
+    }
+
+    // ── STDOUT export target ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_json_sink_to_writer_emits_valid_jsonl() {
+        // Exercises the same serialisation path used when streaming to STDOUT,
+        // but captures the bytes in an in-memory buffer for assertions.
+        let pkt = make_packet(4);
+        let meta = make_meta(v4(1, 2, 3, 4), v4(5, 6, 7, 8), 1234, 443, 6);
+        let rec = build_record(&pkt, &meta, false);
+
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut sink = json::JsonSink::from_writer(&mut buf, false);
+            sink.write(&rec).unwrap();
+            sink.write(&rec).unwrap();
+            assert_eq!(sink.close().unwrap(), 2);
+        }
+
+        let text = String::from_utf8(buf).unwrap();
+        assert_eq!(text.lines().count(), 2, "one JSON object per line");
+        for line in text.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).expect("valid JSON per line");
+            assert_eq!(v["src_port"], 1234);
+            assert_eq!(v["dst_port"], 443);
+        }
+    }
+
+    #[test]
+    fn test_stdout_target_defaults_to_json() {
+        // No explicit format on a STDOUT target must resolve to JSON without error.
+        let target = OutputTarget {
+            dest: OutputDest::Stdout,
+            format: None,
+            compress_payload: false,
+        };
+        assert!(build_sink(&target).is_ok());
+    }
+
+    #[test]
+    fn test_stdout_target_accepts_explicit_json() {
+        let target = OutputTarget {
+            dest: OutputDest::Stdout,
+            format: Some(ExportFormat::Json),
+            compress_payload: false,
+        };
+        assert!(build_sink(&target).is_ok());
+    }
+
+    #[test]
+    fn test_stdout_target_rejects_parquet() {
+        let target = OutputTarget {
+            dest: OutputDest::Stdout,
+            format: Some(ExportFormat::Parquet),
+            compress_payload: false,
+        };
+        assert!(matches!(
+            build_sink(&target),
+            Err(ExportError::StdoutNotJson)
+        ));
+    }
+
+    #[test]
+    fn test_stdout_target_rejects_avro() {
+        let target = OutputTarget {
+            dest: OutputDest::Stdout,
+            format: Some(ExportFormat::Avro),
+            compress_payload: false,
+        };
+        assert!(matches!(
+            build_sink(&target),
+            Err(ExportError::StdoutNotJson)
+        ));
+    }
+
+    #[test]
+    fn test_output_dest_display() {
+        assert_eq!(OutputDest::Stdout.to_string(), "<stdout>");
+        assert_eq!(
+            OutputDest::File(std::path::PathBuf::from("/tmp/out.jsonl")).to_string(),
+            "/tmp/out.jsonl"
+        );
     }
 
     #[test]

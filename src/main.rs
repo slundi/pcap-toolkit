@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use pcap_toolkit::{
     bpf,
     config::{Config, TransformConfig},
-    export::{self, ExportFormat, MultiExportOptions, OutputTarget},
+    export::{self, ExportFormat, MultiExportOptions, OutputDest, OutputTarget},
     filter::{
         Filter, IpNet, PortRange, TcpFlagsFilter, parse_datetime_ns, parse_flow_ids,
         parse_proto_list,
@@ -433,7 +433,7 @@ fn cmd_export(args: &crate::cli::export::ExportArgs, config: &Config) -> Result<
                     ExportFormat::from_extension(path)
                 };
                 OutputTarget {
-                    path: path.clone(),
+                    dest: OutputDest::File(path.clone()),
                     format,
                     compress_payload: args.compress_payload,
                 }
@@ -446,7 +446,7 @@ fn cmd_export(args: &crate::cli::export::ExportArgs, config: &Config) -> Result<
             .outputs
             .iter()
             .map(|o| OutputTarget {
-                path: o.path.clone(),
+                dest: OutputDest::File(o.path.clone()),
                 format: o
                     .format
                     .as_deref()
@@ -458,7 +458,7 @@ fn cmd_export(args: &crate::cli::export::ExportArgs, config: &Config) -> Result<
     } else if let Some(path) = &config.export.path {
         // TOML legacy [export] single path.
         vec![OutputTarget {
-            path: path.clone(),
+            dest: OutputDest::File(path.clone()),
             format: config
                 .export
                 .format
@@ -468,9 +468,14 @@ fn cmd_export(args: &crate::cli::export::ExportArgs, config: &Config) -> Result<
             compress_payload: config.export.compress_payload,
         }]
     } else {
-        anyhow::bail!(
-            "no output specified; use --output PATH or configure [[export.outputs]] in TOML"
-        );
+        // No output given on the CLI or in TOML: stream JSON to STDOUT so the
+        // result can be piped. STDOUT is JSON-only; --format may still select
+        // JSON explicitly, but parquet/avro are rejected in `build_sink`.
+        vec![OutputTarget {
+            dest: OutputDest::Stdout,
+            format: args.format.as_deref().and_then(ExportFormat::parse),
+            compress_payload: args.compress_payload,
+        }]
     };
 
     let unidirectional = args.unidirectional || config.export.unidirectional;
@@ -486,11 +491,15 @@ fn cmd_export(args: &crate::cli::export::ExportArgs, config: &Config) -> Result<
         .with_context(|| format!("failed to export {}", args.input.display()))?;
 
     for out in &report.outputs {
-        println!(
-            "Exported {} packet(s) to {}",
-            out.packets_written,
-            out.output_path.display()
-        );
+        match out.dest {
+            // Status must not pollute the piped JSON stream on STDOUT.
+            OutputDest::Stdout => {
+                eprintln!("Exported {} packet(s) to {}", out.packets_written, out.dest);
+            }
+            OutputDest::File(_) => {
+                println!("Exported {} packet(s) to {}", out.packets_written, out.dest);
+            }
+        }
     }
     Ok(())
 }

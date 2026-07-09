@@ -58,6 +58,11 @@ pub enum ExportError {
     #[error("unsupported export format '{0}': expected json, parquet, or avro")]
     UnknownFormat(String),
 
+    #[error(
+        "STDOUT export supports the JSON format only; parquet and avro require a file path (use --output PATH)"
+    )]
+    StdoutNotJson,
+
     #[error("export producer thread panicked unexpectedly")]
     ThreadPanic,
 }

@@ -57,7 +57,7 @@ pub fn export_cmd() -> impl Parser<Command> {
     let input = input_arg();
     let outputs = long("output")
         .short('o')
-        .help("Output file path (.jsonl, .parquet, or .avro). Repeatable for fan-out to multiple formats.")
+        .help("Output file path (.jsonl, .parquet, or .avro). Repeatable for fan-out to multiple formats. If omitted (and no output is configured in TOML), JSON is streamed to STDOUT for piping.")
         .argument::<PathBuf>("PATH")
         .many();
     let format = long("format")

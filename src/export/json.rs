@@ -50,30 +50,42 @@ struct JsonPacket<'a> {
 /// Streaming JSONL writer that implements [`PacketSink`].
 ///
 /// Each [`PacketSink::write`] call serialises one packet record immediately
-/// without buffering all records in memory first.
-pub struct JsonSink {
-    out: BufWriter<std::fs::File>,
+/// without buffering all records in memory first. Generic over the underlying
+/// writer so records can stream either to a file (via [`JsonSink::create`]) or
+/// to any other sink such as STDOUT (via [`JsonSink::from_writer`]).
+pub struct JsonSink<W: Write> {
+    out: BufWriter<W>,
     compress_payload: bool,
     count: u64,
     b64: base64::engine::general_purpose::GeneralPurpose,
 }
 
-impl JsonSink {
+impl JsonSink<std::fs::File> {
     /// Create a new `JsonSink` writing to `path`.
     ///
     /// Uses a 64 KiB write buffer to reduce syscall overhead.
     pub fn create(path: &Path, compress_payload: bool) -> Result<Self, ExportError> {
         let file = std::fs::File::create(path)?;
-        Ok(Self {
-            out: BufWriter::with_capacity(64 * 1024, file),
-            compress_payload,
-            count: 0,
-            b64: base64::engine::general_purpose::STANDARD,
-        })
+        Ok(Self::from_writer(file, compress_payload))
     }
 }
 
-impl PacketSink for JsonSink {
+impl<W: Write> JsonSink<W> {
+    /// Create a `JsonSink` that serialises records to an arbitrary writer.
+    ///
+    /// Used to stream JSONL to STDOUT (or any non-file destination). Uses a
+    /// 64 KiB write buffer to reduce syscall overhead.
+    pub fn from_writer(writer: W, compress_payload: bool) -> Self {
+        Self {
+            out: BufWriter::with_capacity(64 * 1024, writer),
+            compress_payload,
+            count: 0,
+            b64: base64::engine::general_purpose::STANDARD,
+        }
+    }
+}
+
+impl<W: Write> PacketSink for JsonSink<W> {
     fn write(&mut self, record: &PacketRecord) -> Result<(), ExportError> {
         let src_ip_str = record.src_ip.map(|ip| ip.to_string());
         let dst_ip_str = record.dst_ip.map(|ip| ip.to_string());
