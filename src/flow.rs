@@ -53,7 +53,7 @@ impl FlowKey {
     /// 16 for IPv6) prefixed with a family tag to prevent collisions between
     /// address families.
     pub fn flow_id(&self, unidirectional: bool) -> u64 {
-        let mut buf = [0u8; 38]; // 1 + 16 + 2 + 1 + 16 + 2 = 38
+        let mut buf = [0u8; 39]; // (1 + 16 + 2) * 2 + 1 = 39
         let mut pos = 0;
 
         let (ep_a_ip, ep_a_port, ep_b_ip, ep_b_port) = if unidirectional {
@@ -190,6 +190,18 @@ mod tests {
     fn test_flow_id_deterministic() {
         let key = FlowKey::new(v4(192, 168, 1, 1), v4(8, 8, 8, 8), 54321, 53, 17);
         assert_eq!(key.flow_id(false), key.flow_id(false));
+    }
+
+    #[test]
+    fn test_flow_id_two_ipv6_endpoints() {
+        // Two full IPv6 endpoints exercise the maximum buffer width
+        // (1 + 16 + 2 per endpoint, plus 1 protocol byte = 39). Must not panic.
+        let a: IpAddr = "2001:db8::1".parse().unwrap();
+        let b: IpAddr = "2001:db8::2".parse().unwrap();
+        let fwd = FlowKey::new(a, b, 12345, 443, 6);
+        let rev = FlowKey::new(b, a, 443, 12345, 6);
+        assert_eq!(fwd.flow_id(false), rev.flow_id(false));
+        assert_ne!(fwd.flow_id(true), rev.flow_id(true));
     }
 
     #[test]
