@@ -117,6 +117,23 @@ build-release:
 build-release-cross TARGET:
     cross build --release --target {{TARGET}}
 
+# Assert a musl release binary is fully static (no ELF interpreter, no NEEDED
+# libraries) and actually executes. Guards against accidentally reintroducing
+# a runtime dependency (e.g. enabling zstd's pkg-config feature). Stronger and
+# faster than any container run: if it's static it runs on any Linux.
+# Usage: just verify-static x86_64-unknown-linux-musl
+verify-static TARGET:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin="target/{{TARGET}}/release/{{binary_name}}"
+    if readelf -l "$bin" | grep -q INTERP || readelf -d "$bin" 2>/dev/null | grep -q NEEDED; then
+        echo "error: $bin is dynamically linked — expected a fully static musl build" >&2
+        readelf -d "$bin" 2>/dev/null | grep NEEDED || true
+        exit 1
+    fi
+    "$bin" --version >/dev/null
+    echo "  ✓ {{TARGET}} is fully static"
+
 # Build and package a single release artifact into dist/
 # Usage: just package v1.2.3 x86_64-unknown-linux-musl
 package VERSION TARGET:
@@ -125,6 +142,9 @@ package VERSION TARGET:
     mkdir -p dist
     echo "Building {{binary_name}} {{VERSION}} for {{TARGET}}..."
     cross build --release --target {{TARGET}}
+    if [[ "{{TARGET}}" == *-linux-musl ]]; then
+        just verify-static {{TARGET}}
+    fi
     stage="dist/{{binary_name}}-{{VERSION}}-{{TARGET}}"
     rm -rf "$stage"; mkdir -p "$stage"
     cp README.md LICENSE CHANGELOG.md "$stage/"
@@ -157,6 +177,7 @@ package-all VERSION:
 #   (Codeberg → Settings → Applications → Generate New Token).
 # Usage: just release v1.2.3
 release VERSION: (_release-preflight VERSION) (package-all VERSION)
+    just docker-smoke {{VERSION}}
     just _release-tag-push {{VERSION}}
     just _release-codeberg {{VERSION}}
     @echo "✓ Release {{VERSION}} published: https://codeberg.org/{{codeberg_owner}}/{{codeberg_repo}}/releases/tag/{{VERSION}}"
@@ -213,6 +234,19 @@ docker-context VERSION:
     done
     echo "docker build context ready:"
     ls -la {{binary_name}}-linux-*
+
+# Build the distroless release image from local musl artifacts and smoke-test
+# it. Because the base is essentially scratch (distroless/static), a passing
+# `--version` here proves the binary runs on the most minimal Linux there is —
+# a far stronger portability signal than any debian:slim run. Run after
+# `just package-all VERSION`.
+# Usage: just docker-smoke v1.2.3
+docker-smoke VERSION: (docker-context VERSION)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker build -t {{binary_name}}:smoke .
+    out="$(docker run --rm {{binary_name}}:smoke --version)"
+    echo "  ✓ distroless image runs: $out"
 
 _release-codeberg VERSION:
     #!/usr/bin/env bash

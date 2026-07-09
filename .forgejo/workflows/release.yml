@@ -1,23 +1,21 @@
-# Build the Linux release binaries and publish them to the Codeberg release
-# matching the pushed `v*` tag.
+# Build the release binaries and publish them to the Codeberg release matching
+# the pushed `v*` tag.
 #
-# Asset contract (consumed by install.sh and .forgejo/workflows/docker-release.yml):
-#   - archive name:   pcap-toolkit-<tag>-<target>.tar.gz
-#   - archive layout: pcap-toolkit-<tag>-<target>/pcap-toolkit   (binary wrapped in a dir)
-#   - checksums file: pcap-toolkit-<tag>-SHA256SUMS
-#   where <tag> is the full tag including the leading "v" (e.g. v0.4.0).
+# This is a thin wrapper over the justfile so CI and a local `just release`
+# produce byte-identical artifacts from a single source of truth:
+#   - targets:   the justfile's `release_targets` (musl x2 + windows-gnu)
+#   - packaging: `just package-all`   (versioned tarballs + wrapping dir + SHA256SUMS)
+#   - static:    `just verify-static` runs inside `package` for musl targets
+#   - smoke:     `just docker-smoke`  runs the distroless image's `--version`
+#   - upload:    `just _release-codeberg`
+# The asset layout is the contract consumed by install.sh and docker-release.yml.
 #
-# The musl targets are fully static (no glibc / no ld.so) and are the
-# recommended download — they run on any Linux (old Debian, Alpine,
-# distroless, scratch). gnu builds are kept for parity.
+# Auth: _release-codeberg reads CODEBERG_TOKEN; we feed it the automatic
+# per-run token (Forgejo provides GITHUB_TOKEN with contents:write). Override
+# with a dedicated CODEBERG_TOKEN secret if your instance's token lacks scope.
 #
-# macOS and Windows are not built here (Codeberg has no such runners); those
-# assets, if needed, must be uploaded to the same release by another means.
-#
-# Auth: uses the automatic per-run token (GITHUB_TOKEN, provided by Forgejo
-# Actions) with contents:write on this repo. No extra secret required.
-#
-# Runner: a docker-capable Forgejo Actions runner (same class as docker-release).
+# Runner: a docker-capable Forgejo Actions runner (same class as docker-release);
+# `cross` and `just docker-smoke` both need a reachable docker daemon.
 
 name: release
 
@@ -28,7 +26,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  BINARY_NAME: pcap-toolkit
   # cross launches its own containers; tell it we are already inside one.
   CROSS_CONTAINER_IN_CONTAINER: "true"
 
@@ -40,6 +37,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git-cliff needs full history for release notes
 
       - name: Resolve version
         id: ver
@@ -48,72 +47,25 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
-
-      - name: Build, package and checksum
-        env:
-          VER: ${{ steps.ver.outputs.tag }}
+      - name: Install release tooling
         run: |
           set -euo pipefail
-          mkdir -p dist
+          apt-get update && apt-get install -y --no-install-recommends jq zip binutils
+          cargo install --locked just git-cliff
+          cargo install --locked cross --git https://github.com/cross-rs/cross
 
-          # target:builder  — "cross" for cross-compiled arches, "cargo" for native x86_64.
-          targets="
-            x86_64-unknown-linux-musl:cross
-            aarch64-unknown-linux-musl:cross
-            x86_64-unknown-linux-gnu:cargo
-            aarch64-unknown-linux-gnu:cross
-            armv7-unknown-linux-gnueabihf:cross
-            i686-unknown-linux-gnu:cross
-          "
+      - name: Build, verify and package all targets
+        env:
+          VER: ${{ steps.ver.outputs.tag }}
+        run: just package-all "$VER"
 
-          for entry in $targets; do
-            target="${entry%%:*}"
-            builder="${entry##*:}"
-            echo "::group::build $target ($builder)"
-            if [ "$builder" = "cross" ]; then
-              cross build --release --locked --target "$target"
-            else
-              rustup target add "$target"
-              cargo build --release --locked --target "$target"
-            fi
-            echo "::endgroup::"
-
-            stage="${BINARY_NAME}-${VER}-${target}"
-            mkdir -p "$stage"
-            cp "target/${target}/release/${BINARY_NAME}" "$stage/"
-            tar czf "dist/${stage}.tar.gz" "$stage"
-            rm -rf "$stage"
-          done
-
-          # Checksums over the bare archive names (install.sh greps " <asset>$").
-          ( cd dist && sha256sum ${BINARY_NAME}-${VER}-*.tar.gz > "${BINARY_NAME}-${VER}-SHA256SUMS" )
-          ls -la dist
+      - name: Smoke-test the distroless image
+        env:
+          VER: ${{ steps.ver.outputs.tag }}
+        run: just docker-smoke "$VER"
 
       - name: Publish to Codeberg release
         env:
           VER: ${{ steps.ver.outputs.tag }}
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          api="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}"
-          auth="Authorization: token ${TOKEN}"
-
-          # Reuse the release if it already exists (e.g. re-run), else create it.
-          rel_id="$(curl -fsSL -H "$auth" "${api}/releases/tags/${VER}" 2>/dev/null \
-            | grep -m1 '"id"' | grep -oE '[0-9]+' || true)"
-          if [ -z "$rel_id" ]; then
-            rel_id="$(curl -fsSL -H "$auth" -H 'Content-Type: application/json' \
-              -d "{\"tag_name\":\"${VER}\",\"name\":\"${VER}\",\"generate_release_notes\":true}" \
-              "${api}/releases" | grep -m1 '"id"' | grep -oE '[0-9]+')"
-          fi
-          echo "release id: $rel_id"
-
-          for f in dist/*; do
-            name="$(basename "$f")"
-            echo "uploading $name"
-            curl -fsSL -H "$auth" \
-              -F "attachment=@${f};filename=${name}" \
-              "${api}/releases/${rel_id}/assets?name=${name}" >/dev/null
-          done
+          CODEBERG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: just _release-codeberg "$VER"
