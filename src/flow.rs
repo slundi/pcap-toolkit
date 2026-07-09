@@ -73,6 +73,32 @@ impl FlowKey {
 
         rapidhash::v2::rapidhash_v2_2(&buf[..pos])
     }
+
+    /// Return the canonical form of this key used to group packets into a flow.
+    ///
+    /// In **bidirectional** mode the two endpoints are ordered (the same way
+    /// [`FlowKey::flow_id`] canonicalises them) so that A→B and B→A collapse to
+    /// a single key. In **unidirectional** mode the key is returned unchanged,
+    /// so each direction remains a distinct flow.
+    ///
+    /// Two keys share a canonical form iff they share a bidirectional
+    /// [`flow_id`](FlowKey::flow_id), but grouping on the canonical key is
+    /// collision-free (no hashing) and yields a deterministic representative
+    /// 5-tuple for display.
+    pub fn canonical(&self, unidirectional: bool) -> FlowKey {
+        if unidirectional {
+            return self.clone();
+        }
+        let (a_ip, a_port, b_ip, b_port) =
+            canonicalize(self.src_ip, self.src_port, self.dst_ip, self.dst_port);
+        FlowKey {
+            src_ip: a_ip,
+            dst_ip: b_ip,
+            src_port: a_port,
+            dst_port: b_port,
+            protocol: self.protocol,
+        }
+    }
 }
 
 /// Canonicalise two endpoints so the result is consistent regardless of direction.
@@ -202,6 +228,38 @@ mod tests {
         let rev = FlowKey::new(b, a, 443, 12345, 6);
         assert_eq!(fwd.flow_id(false), rev.flow_id(false));
         assert_ne!(fwd.flow_id(true), rev.flow_id(true));
+    }
+
+    #[test]
+    fn test_canonical_bidirectional_collapses_directions() {
+        let fwd = FlowKey::new(v4(10, 0, 0, 1), v4(10, 0, 0, 2), 12345, 443, 6);
+        let rev = FlowKey::new(v4(10, 0, 0, 2), v4(10, 0, 0, 1), 443, 12345, 6);
+        // Both directions produce the same canonical key.
+        assert_eq!(fwd.canonical(false), rev.canonical(false));
+        // ...consistent with sharing a bidirectional flow ID.
+        assert_eq!(fwd.flow_id(false), rev.flow_id(false));
+    }
+
+    #[test]
+    fn test_canonical_unidirectional_is_identity() {
+        let fwd = FlowKey::new(v4(10, 0, 0, 1), v4(10, 0, 0, 2), 12345, 443, 6);
+        let rev = FlowKey::new(v4(10, 0, 0, 2), v4(10, 0, 0, 1), 443, 12345, 6);
+        // Unchanged: each direction keeps its own key.
+        assert_eq!(fwd.canonical(true), fwd);
+        assert_ne!(fwd.canonical(true), rev.canonical(true));
+    }
+
+    #[test]
+    fn test_canonical_bidirectional_is_deterministic_representative() {
+        // Regardless of which direction is presented, the canonical key names
+        // the lower-ordered endpoint as the source.
+        let fwd = FlowKey::new(v4(192, 168, 1, 1), v4(8, 8, 8, 8), 51000, 53, 17);
+        let rev = FlowKey::new(v4(8, 8, 8, 8), v4(192, 168, 1, 1), 53, 51000, 17);
+        let c = fwd.canonical(false);
+        assert_eq!(c, rev.canonical(false));
+        // 8.8.8.8 orders before 192.168.1.1, so it is the canonical source.
+        assert_eq!(c.src_ip, v4(8, 8, 8, 8));
+        assert_eq!(c.dst_ip, v4(192, 168, 1, 1));
     }
 
     #[test]

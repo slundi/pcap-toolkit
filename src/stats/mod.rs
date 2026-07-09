@@ -71,7 +71,9 @@ pub struct StatsCollector {
     total_bytes: u64,
     unique_src_ips: HashSet<IpAddr>,
     unique_dst_ips: HashSet<IpAddr>,
-    /// Map from FlowKey → (flow_id, packets, bytes).
+    /// Map from canonical [`FlowKey`] → (flow_id, packets, bytes). The key is
+    /// canonicalised per [`FlowKey::canonical`], so bidirectional flows merge
+    /// both directions under one entry.
     flow_map: HashMap<FlowKey, (u64, u64, u64)>,
 }
 
@@ -110,7 +112,11 @@ impl StatsCollector {
             self.unique_dst_ips.insert(k.dst_ip);
 
             let flow_id = k.flow_id(self.unidirectional);
-            let entry = self.flow_map.entry(k.clone()).or_insert((flow_id, 0, 0));
+            // Group on the canonical key so that in bidirectional mode the two
+            // directions of a conversation merge into a single flow; in
+            // unidirectional mode the key is unchanged and directions stay split.
+            let canon = k.canonical(self.unidirectional);
+            let entry = self.flow_map.entry(canon).or_insert((flow_id, 0, 0));
             entry.1 += 1;
             entry.2 += u64::from(captured_len);
         }
@@ -187,19 +193,41 @@ mod tests {
     }
 
     #[test]
-    fn test_flow_aggregation_counts_correctly() {
+    fn test_bidirectional_merges_both_directions_into_one_flow() {
         let mut col = StatsCollector::new(false);
         let k = key(v4(10, 0, 0, 1), v4(10, 0, 0, 2), 1000, 443, 6);
         col.feed(1_000_000_000, 100, Some(k.clone()));
         col.feed(2_000_000_000, 200, Some(k.clone()));
-        // Reverse direction — same bidirectional flow.
+        // Reverse direction — same bidirectional flow, must merge.
         let rev = key(v4(10, 0, 0, 2), v4(10, 0, 0, 1), 443, 1000, 6);
         col.feed(3_000_000_000, 50, Some(rev));
         let info = col.finish();
         assert_eq!(info.total_packets, 3);
         assert_eq!(info.total_bytes, 350);
-        // Two distinct FlowKeys but both map to the same bidirectional flow ID.
+        // Forward + reverse collapse into a single bidirectional flow whose
+        // packet/byte counts aggregate both directions.
+        assert_eq!(info.flow_count(), 1);
+        assert_eq!(info.flows[0].packets, 3);
+        assert_eq!(info.flows[0].bytes, 350);
+    }
+
+    #[test]
+    fn test_unidirectional_keeps_directions_separate() {
+        let mut col = StatsCollector::new(true);
+        let k = key(v4(10, 0, 0, 1), v4(10, 0, 0, 2), 1000, 443, 6);
+        col.feed(1_000_000_000, 100, Some(k.clone()));
+        col.feed(2_000_000_000, 200, Some(k));
+        // Reverse direction — a distinct flow in unidirectional mode.
+        let rev = key(v4(10, 0, 0, 2), v4(10, 0, 0, 1), 443, 1000, 6);
+        col.feed(3_000_000_000, 50, Some(rev));
+        let info = col.finish();
+        assert_eq!(info.total_packets, 3);
+        assert_eq!(info.total_bytes, 350);
+        // Two directions → two separate flows, each with its own counts.
         assert_eq!(info.flow_count(), 2);
+        let mut pkts: Vec<u64> = info.flows.iter().map(|f| f.packets).collect();
+        pkts.sort_unstable();
+        assert_eq!(pkts, vec![1, 2]);
     }
 
     #[test]

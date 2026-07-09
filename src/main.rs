@@ -747,9 +747,11 @@ mod tests {
 
     #[test]
     fn test_stats_json_flow_details() {
-        let mut col = StatsCollector::new(false);
+        // Unidirectional so the raw 5-tuple is preserved (no canonical reorder),
+        // keeping the src/dst field assertions direction-stable.
+        let mut col = StatsCollector::new(true);
         let k = FlowKey::new(v4(192, 168, 1, 1), v4(8, 8, 8, 8), 5000, 53, 17);
-        let expected_flow_id = k.flow_id(false);
+        let expected_flow_id = k.flow_id(true);
         col.feed(1_000_000_000, 60, Some(k));
         let info = col.finish();
 
