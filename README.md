@@ -7,6 +7,8 @@
 
 A high-performance CLI for inspecting, filtering, sorting, modifying, replaying, and exporting PCAP captures — designed to handle everything from quick triage to TB-scale data pipeline ingestion.
 
+📖 **Full CLI reference:** [`docs/CLI.md`](docs/CLI.md) — every flag, filter grammar, config file schema.
+
 ## Table of Contents
 
 - [Why pcap-toolkit?](#why-pcap-toolkit)
@@ -33,6 +35,8 @@ Extract a full capture summary in a single streaming pass, without loading paylo
 - Per-flow statistics keyed by 5-tuple `(src_ip, dst_ip, src_port, dst_port, protocol)`
 - Deterministic **Flow ID** (`xxh3_64` hash) — bidirectional by default so A→B and B→A share one ID; `--unidirectional` for direction-aware keying
 
+See [`docs/CLI.md#info`](docs/CLI.md#info) and [`docs/CLI.md#stats`](docs/CLI.md#stats).
+
 ### Filtering
 
 Composable filters applied after sorting, before any output or replay:
@@ -54,6 +58,8 @@ Composable filters applied after sorting, before any output or replay:
 
 Rules of the same type are OR-ed; different types are AND-ed. Full boolean control (`and` / `or` / `not`) is available in the TOML configuration.
 
+Full filter syntax — BPF grammar, TCP flag notation, datetime formats, CIDR handling — is in [`docs/CLI.md#filter-grammar-reference`](docs/CLI.md#filter-grammar-reference).
+
 ### Two-Pass Sorting
 
 Strict chronological ordering with a near-zero RAM footprint (~20 bytes per packet):
@@ -61,7 +67,7 @@ Strict chronological ordering with a near-zero RAM footprint (~20 bytes per pack
 1. **First pass** — build a `(timestamp_ns, byte_offset, length)` index. Kept in memory for normal files; streamed to a `.idx` sidecar on disk for TB-scale inputs (~20 MB index per 1 M packets).
 2. **Second pass** — sort the index, then seek-and-stream packets in order to the output pipeline.
 
-Sorted output can be time-sliced into separate files (hourly, daily, or any custom interval).
+Sorted output can be time-sliced into separate files (hourly, daily, or any custom interval). See [`docs/CLI.md#sort`](docs/CLI.md#sort).
 
 ### Traffic Modification
 
@@ -72,6 +78,8 @@ Applied during the second pass, before writing or replaying:
 - **Timestamp shifting** — provide a target start datetime (ms epoch); all timestamps are shifted by the computed delta. Useful for re-anchoring old captures to a lab timeline.
 - **IP address mapping** — replace specific IPs with others (`--replace-ip 10.0.0.1=192.168.1.1`) or via a TOML mapping table. Checksums are automatically recomputed after any header change.
 
+Transform flags are documented under [`docs/CLI.md#transform-options`](docs/CLI.md#transform-options).
+
 ### Export
 
 Convert filtered, sorted captures into modern data formats:
@@ -80,7 +88,7 @@ Convert filtered, sorted captures into modern data formats:
 - **Apache Parquet** — typed columnar schema (timestamps, IPs as integers, ports, flags, flow ID, payload). Row groups encoded in parallel with `Rayon`.
 - **Apache Avro** — schema-first encoding; Avro schema file emitted alongside the data for self-describing datasets.
 
-All formats integrate directly with DuckDB, Spark, Snowflake, and Elasticsearch.
+All formats integrate directly with DuckDB, Spark, Snowflake, and Elasticsearch. See [`docs/CLI.md#export`](docs/CLI.md#export).
 
 ### Live Replay
 
@@ -90,36 +98,36 @@ Send a processed capture back onto a network interface:
 - Accepts replay interface via CLI or TOML config
 - Requires `CAP_NET_RAW`; missing capability is caught early with a clear error
 
+See [`docs/CLI.md#replay`](docs/CLI.md#replay).
+
 ## Usage
+
+A handful of representative invocations — the complete reference (every flag,
+every subcommand, filter grammar, exit codes) lives in [`docs/CLI.md`](docs/CLI.md).
 
 ```sh
 # Summarise a capture
 pcap-toolkit info traffic.pcap
 
-# Show per-flow statistics
-pcap-toolkit stats traffic.pcap
-
-# Emit the same statistics as machine-readable JSON
+# Per-flow statistics, machine-readable JSON
 pcap-toolkit stats --json traffic.pcap
 
-# Filter to HTTPS traffic from a subnet and export to Parquet
+# Sort a large capture into hourly files
+pcap-toolkit sort --slice 1h --output sorted/ traffic.pcap
+
+# Filter to HTTPS from a subnet and export to Parquet
 pcap-toolkit export --proto tcp --dst-port 443 --src-ip 10.0.0.0/8 \
   --format parquet --output out.parquet traffic.pcap
 
-# Sort a large capture and split into hourly files
-pcap-toolkit sort --slice 1h --output sorted/ traffic.pcap
+# Replay onto a live NIC at 2× real-time speed
+sudo pcap-toolkit replay --speed 2.0 --interface eth0 traffic.pcap
 
-# Shift timestamps so the capture starts now, then replay at 2× speed
-pcap-toolkit replay --shift now --speed 2.0 --interface eth0 traffic.pcap
-
-# Extract a specific flow by ID
-pcap-toolkit export --flow-id a3f2c1b0e4d5... --format json traffic.pcap
-
-# Use a BPF expression for complex filtering
+# BPF expression for complex filtering
 pcap-toolkit export --filter "tcp and dst port 443 and src net 10.0.0.0/8" traffic.pcap
 ```
 
-> Commands and flags are illustrative — see `pcap-toolkit --help` for the authoritative reference as the CLI stabilises.
+Run `pcap-toolkit <subcommand> --help` for a short, generated summary; see
+[`docs/CLI.md`](docs/CLI.md) for the full narrative reference.
 
 ## Configuration
 
@@ -155,7 +163,7 @@ interface = "eth0"
 speed     = 1.0
 ```
 
-CLI flags take precedence over the config file.
+CLI flags take precedence over the config file. The full TOML schema is documented in [`docs/CLI.md#configuration-file`](docs/CLI.md#configuration-file).
 
 ## Installation
 
