@@ -75,6 +75,29 @@ name = "basic"
 [package.metadata.cargo-machete]
 ignored = []
 
+# --- cargo-deb ---
+# Packaged via `just deb` from the fully static musl amd64 binary, so the
+# package carries no shared-library dependencies. Assets are listed explicitly
+# to ship only the main binary (not the `gen_fixtures` dev helper) and to point
+# at the musl target dir that `just deb` builds into.
+[package.metadata.deb]
+maintainer = "Sébastien LUNDI <slundi@stamus-networks.com>"
+section = "net"
+priority = "optional"
+depends = ""
+extended-description = """
+A high-performance CLI for inspecting, filtering, sorting, modifying, replaying,
+and exporting PCAP captures. Streams packets with a minimal memory footprint and
+uses multiple cores for throughput, scaling from small samples to TB-scale
+archives. Exports to JSON, Apache Parquet, and Apache Avro."""
+# `target/release/` is a cargo-deb magic prefix — it rewrites it to the actual
+# --target directory. Listing only this binary excludes the gen_fixtures helper.
+assets = [
+    ["target/release/pcap-toolkit", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/pcap-toolkit/README.md", "644"],
+    ["CHANGELOG.md", "usr/share/doc/pcap-toolkit/CHANGELOG.md", "644"],
+]
+
 # --- Profiles ---
 
 # Standard Dev Profile (Optimized for speed of compilation)

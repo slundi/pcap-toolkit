@@ -37,6 +37,14 @@
       # Define the rust toolchain from your toml
       rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
+      # musl cross toolchain for fully static amd64 builds (`just deb`).
+      # `cross` can't drive the Nix-provided rustc, so we build musl natively:
+      # rustc gets the musl std (added in rust-toolchain.toml) and the `cc`/`zstd`
+      # crates compile their C against this musl gcc instead of the host glibc.
+      muslCc = pkgs.pkgsCross.musl64.stdenv.cc;
+      muslCcBin = "${muslCc}/bin/${muslCc.targetPrefix}cc";
+      muslArBin = "${muslCc.bintools.bintools}/bin/${muslCc.targetPrefix}ar";
+
       # Read project metadata from Cargo.toml for reuse below
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
     in {
@@ -50,11 +58,19 @@
       };
 
       devShells.default = pkgs.mkShell {
+        # Point cargo/cc at the musl cross toolchain for `--target
+        # x86_64-unknown-linux-musl` (used by `just deb`). Underscored target
+        # names are what the `cc` crate and cargo expect.
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = muslCcBin;
+        CC_x86_64_unknown_linux_musl = muslCcBin;
+        AR_x86_64_unknown_linux_musl = muslArBin;
+
         buildInputs = with pkgs; [
           rustToolchain
           cargo-dist
           cargo-nextest
           cargo-cross
+          cargo-deb # Build .deb packages (used by the `just deb` recipe)
           cargo-machete
           cargo-audit
           cargo-deny

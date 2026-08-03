@@ -158,6 +158,26 @@ package VERSION TARGET:
     rm -rf "$stage"
     echo "  packaged $(ls dist/{{binary_name}}-{{VERSION}}-{{TARGET}}.*)"
 
+# Build a static MUSL amd64 binary and package it into a .deb (requires cargo-deb).
+# Builds natively against the musl target — the flake devShell wires up the musl
+# cross compiler, so no `cross`/Docker is needed. Run inside `nix develop`.
+# cargo-deb reads package metadata from Cargo.toml. The .deb lands in dist/.
+# Usage: just deb
+deb:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="x86_64-unknown-linux-musl"
+    mkdir -p dist
+    cargo build --release --target "$target"
+    just verify-static "$target"
+    # --no-build: package the binary we just built (avoid a redundant rebuild).
+    # --no-strip: keep symbols for addr2line on crash reports (see release profile).
+    cargo deb --no-build --no-strip --target "$target" --output dist/
+    echo "  packaged $(ls dist/*.deb | tail -n1)"
+
+nix-deb:
+    nix develop --command just deb
+
 # Build all locally-supported release targets and write SHA256SUMS
 # Usage: just package-all v1.2.3
 package-all VERSION:
