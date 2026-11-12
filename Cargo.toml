@@ -38,7 +38,7 @@ targets = [
 [dependencies]
 anyhow = "1.0.102"
 apache-avro = { version = "0.21", features = ["zstandard"] }
-base64 = "0.22"
+base64 = "0.23"
 bpaf = "0.9.26"
 chrono = "0.4.44"
 etherparse = "0.20.1"
