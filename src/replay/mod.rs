@@ -17,13 +17,12 @@
 //! Raw sockets require `CAP_NET_RAW`. If the capability is absent the function
 //! returns [`ReplayError::PermissionDenied`] with a remediation hint.
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::bpf::BpfExpr;
 use crate::error::ReplayError;
 use crate::filter::{Filter, PacketMeta};
-use crate::pcap;
+use crate::pcap::{self, PacketSource};
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -114,8 +113,11 @@ pub struct ReplayReport {
 /// # Errors
 /// Returns [`ReplayError`] on I/O failure, missing `CAP_NET_RAW`,
 /// unknown interface name, or if the platform is not Linux.
-pub fn replay_file(input: &Path, opts: &ReplayOptions) -> Result<ReplayReport, ReplayError> {
-    platform::replay_impl(input, opts)
+pub fn replay_file(
+    input: impl Into<PacketSource>,
+    opts: &ReplayOptions,
+) -> Result<ReplayReport, ReplayError> {
+    platform::replay_impl(&input.into(), opts)
 }
 
 // ── Timing helper (platform-independent) ─────────────────────────────────────
@@ -286,7 +288,10 @@ mod platform {
         Ok(sock)
     }
 
-    pub fn replay_impl(input: &Path, opts: &ReplayOptions) -> Result<ReplayReport, ReplayError> {
+    pub fn replay_impl(
+        input: &PacketSource,
+        opts: &ReplayOptions,
+    ) -> Result<ReplayReport, ReplayError> {
         let sockets: Vec<Socket> = opts
             .interfaces
             .iter()
@@ -295,8 +300,8 @@ mod platform {
 
         let has_filter = !opts.filter.is_empty() || opts.bpf_filter.is_some();
 
-        let iter =
-            pcap::open_with_payload(input).map_err(|e| ReplayError::PcapParse(e.to_string()))?;
+        let iter = pcap::open_source_with_payload(input)
+            .map_err(|e| ReplayError::PcapParse(e.to_string()))?;
 
         let mut packets_sent: u64 = 0;
         let mut bytes_sent: u64 = 0;
@@ -352,7 +357,10 @@ mod platform {
 mod platform {
     use super::*;
 
-    pub fn replay_impl(_input: &Path, _opts: &ReplayOptions) -> Result<ReplayReport, ReplayError> {
+    pub fn replay_impl(
+        _input: &PacketSource,
+        _opts: &ReplayOptions,
+    ) -> Result<ReplayReport, ReplayError> {
         Err(ReplayError::NotSupported)
     }
 }

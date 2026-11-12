@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use pcap_toolkit::{
     bpf::{self, BpfExpr},
     filter::Filter,
-    pcap,
+    pcap::{self, PacketSource},
 };
 use rustc_hash::FxHashSet;
 
@@ -50,6 +50,28 @@ pub fn apply_min_flow(
     match min_packets {
         Some(threshold) => resolve_min_flow_filter(inputs, &filter, bpf_filter, threshold),
         None => Ok(filter),
+    }
+}
+
+/// [`apply_min_flow`] for a single [`PacketSource`].
+///
+/// The threshold needs a pre-scan, i.e. reading the input twice, so it is
+/// rejected for stdin.
+pub fn apply_min_flow_to_source(
+    source: &PacketSource,
+    filter: Filter,
+    bpf_filter: Option<&BpfExpr>,
+    min_packets: Option<u64>,
+) -> Result<Filter> {
+    match (source, min_packets) {
+        (_, None) => Ok(filter),
+        (PacketSource::Stdin, Some(_)) => anyhow::bail!(
+            "--min-flow-packets reads the input twice and cannot be used with stdin ('-'); \
+             save the capture to a file first"
+        ),
+        (PacketSource::File(path), Some(threshold)) => {
+            resolve_min_flow_filter(&[path.as_path()], &filter, bpf_filter, threshold)
+        }
     }
 }
 
@@ -227,6 +249,28 @@ mod tests {
         let out = apply_min_flow(&[], filter, None, None).unwrap();
         assert_eq!(out.min_len, Some(42));
         assert!(out.flow_ids.is_empty());
+    }
+
+    #[test]
+    fn test_apply_min_flow_to_source_none_is_identity_even_for_stdin() {
+        let out =
+            apply_min_flow_to_source(&PacketSource::Stdin, Filter::default(), None, None).unwrap();
+        assert!(out.flow_ids.is_empty());
+    }
+
+    #[test]
+    fn test_apply_min_flow_to_source_rejects_stdin() {
+        let err = apply_min_flow_to_source(&PacketSource::Stdin, Filter::default(), None, Some(1))
+            .unwrap_err();
+        assert!(err.to_string().contains("--min-flow-packets"));
+        assert!(err.to_string().contains("stdin"));
+    }
+
+    #[test]
+    fn test_apply_min_flow_to_source_file_prescans() {
+        let source = PacketSource::File(fixture("mixed.pcap"));
+        let out = apply_min_flow_to_source(&source, Filter::default(), None, Some(1)).unwrap();
+        assert!(!out.flow_ids.is_empty());
     }
 
     #[test]

@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use pcap_toolkit::{
     config::{Config, TransformConfig},
     filter::{parse_datetime_ns, parse_proto_list},
+    pcap::PacketSource,
     sort::{self, SortOptions},
     transform::{ProtocolTruncation, TransformOptions, parse_ip_mapping},
 };
@@ -28,6 +29,18 @@ impl SortContext {
     pub fn resolve(args: &cli::SortArgs, config: &Config) -> Result<Self> {
         if args.inputs.is_empty() {
             anyhow::bail!("sort requires at least one input file");
+        }
+        // The second pass seeks back to each packet, so every input must be a
+        // real file. Catch `-` here instead of failing on a file named "-".
+        if args
+            .inputs
+            .iter()
+            .any(|path| PacketSource::from_arg(path).is_stdin())
+        {
+            anyhow::bail!(
+                "sort needs seekable input files and cannot read stdin ('-'); \
+                 save the capture to a file first"
+            );
         }
 
         let slice_secs = args
@@ -155,6 +168,16 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("at least one input"));
+    }
+
+    #[test]
+    fn test_resolve_rejects_stdin_input() {
+        let mut args = args_with_input();
+        args.inputs.push(PathBuf::from("-"));
+        let err = SortContext::resolve(&args, &Config::default())
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("seekable"));
     }
 
     #[test]

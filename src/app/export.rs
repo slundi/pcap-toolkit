@@ -1,27 +1,27 @@
 //! `export` subcommand: context resolution and presentation.
 
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use pcap_toolkit::{
     config::{Config, ExportConfig},
     export::{self, ExportFormat, MultiExportOptions, OutputDest, OutputTarget},
+    pcap::PacketSource,
 };
 
-use super::{apply_min_flow, filter_args::build_filter, parse_bpf};
+use super::{apply_min_flow_to_source, filter_args::build_filter, parse_bpf};
 use crate::cli::export::ExportArgs;
 
 /// Fully resolved inputs for one `export` invocation.
 pub struct ExportContext {
-    pub input: PathBuf,
+    pub input: PacketSource,
     pub opts: MultiExportOptions,
 }
 
 impl ExportContext {
     /// Merge CLI arguments with the TOML config and validate them.
     ///
-    /// When `--min-flow-packets` is set this performs the flow pre-scan over
-    /// the input file, so it may read it.
+    /// An input of `-` reads from stdin. When `--min-flow-packets` is set this
+    /// performs the flow pre-scan over the input file (so it may read it), and
+    /// is rejected for stdin.
     pub fn resolve(args: &ExportArgs, config: &Config) -> Result<Self> {
         // Validate --format if explicitly provided.
         if let Some(text) = &args.format
@@ -30,17 +30,14 @@ impl ExportContext {
             anyhow::bail!("unknown export format '{text}'; expected json, parquet, or avro");
         }
 
+        let input = PacketSource::from_arg(&args.input);
         let filter = build_filter(args)?;
         let bpf_filter = parse_bpf(args.filter_expr.as_deref())?;
-        let filter = apply_min_flow(
-            &[args.input.as_path()],
-            filter,
-            bpf_filter.as_ref(),
-            args.min_flow_packets,
-        )?;
+        let filter =
+            apply_min_flow_to_source(&input, filter, bpf_filter.as_ref(), args.min_flow_packets)?;
 
         Ok(Self {
-            input: args.input.clone(),
+            input,
             opts: MultiExportOptions {
                 targets: resolve_targets(args, &config.export),
                 filter,
@@ -56,7 +53,7 @@ pub fn run(args: &ExportArgs, config: &Config) -> Result<()> {
     let ctx = ExportContext::resolve(args, config)?;
 
     let report = export::export_multi(&ctx.input, &ctx.opts)
-        .with_context(|| format!("failed to export {}", ctx.input.display()))?;
+        .with_context(|| format!("failed to export {}", ctx.input))?;
 
     for out in &report.outputs {
         match out.dest {
@@ -152,6 +149,7 @@ mod tests {
     use super::*;
     use crate::app::test_support::{export_args, fixture};
     use pcap_toolkit::config::ExportOutputConfig;
+    use std::path::PathBuf;
 
     fn file_dest(target: &OutputTarget) -> &std::path::Path {
         match &target.dest {
@@ -293,6 +291,29 @@ mod tests {
         args.min_flow_packets = Some(1);
         let ctx = ExportContext::resolve(&args, &Config::default()).unwrap();
         assert!(!ctx.opts.filter.flow_ids.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_dash_selects_stdin() {
+        let mut args = export_args();
+        args.input = PathBuf::from("-");
+        let ctx = ExportContext::resolve(&args, &Config::default()).unwrap();
+        assert_eq!(ctx.input, PacketSource::Stdin);
+
+        args.input = fixture("mixed.pcap");
+        let ctx = ExportContext::resolve(&args, &Config::default()).unwrap();
+        assert_eq!(ctx.input, PacketSource::File(fixture("mixed.pcap")));
+    }
+
+    #[test]
+    fn test_resolve_stdin_rejects_min_flow() {
+        let mut args = export_args();
+        args.input = PathBuf::from("-");
+        args.min_flow_packets = Some(2);
+        let err = ExportContext::resolve(&args, &Config::default())
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("stdin"));
     }
 
     #[test]

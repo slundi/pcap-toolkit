@@ -121,7 +121,7 @@ fn config_opt() -> impl Parser<Option<PathBuf>> {
 }
 
 fn input_arg() -> impl Parser<PathBuf> {
-    positional::<PathBuf>("INPUT").help("Input PCAP or PCAPng file")
+    positional::<PathBuf>("INPUT").help("Input PCAP or PCAPng file, or `-` to read from stdin")
 }
 
 fn info_cmd() -> impl Parser<Command> {

@@ -24,7 +24,7 @@ use std::path::Path;
 use crate::bpf::BpfExpr;
 use crate::error::ExportError;
 use crate::filter::{Filter, PacketMeta};
-use crate::pcap;
+use crate::pcap::{self, PacketSource};
 
 // ── PacketSink trait ──────────────────────────────────────────────────────────
 
@@ -199,9 +199,10 @@ pub struct PacketRecord {
 /// serialisation error.  If any sink fails mid-stream the producer is signalled
 /// to stop and the first error is returned.
 pub fn export_multi(
-    input: &Path,
+    input: impl Into<PacketSource>,
     opts: &MultiExportOptions,
 ) -> Result<MultiExportReport, ExportError> {
+    let source: PacketSource = input.into();
     if opts.targets.is_empty() {
         return Ok(MultiExportReport {
             outputs: Vec::new(),
@@ -227,15 +228,14 @@ pub fn export_multi(
     let (tx, rx) = std::sync::mpsc::sync_channel::<PacketRecord>(CHANNEL_CAPACITY);
 
     // Producer: reads PCAP, applies filters, sends PacketRecords.
-    let input_owned = input.to_owned();
     let filter = opts.filter.clone();
     let bpf_filter = opts.bpf_filter.clone();
     let unidirectional = opts.unidirectional;
 
     let producer = std::thread::spawn(move || -> Result<(), ExportError> {
         let has_filter = !filter.is_empty() || bpf_filter.is_some();
-        for item in
-            pcap::open_with_payload(&input_owned).map_err(|e| ExportError::Parse(e.to_string()))?
+        for item in pcap::open_source_with_payload(&source)
+            .map_err(|e| ExportError::Parse(e.to_string()))?
         {
             let packet = item.map_err(|e| ExportError::Parse(e.to_string()))?;
             let meta = PacketMeta::from_packet(
@@ -289,7 +289,10 @@ pub fn export_multi(
 /// # Errors
 /// Returns [`ExportError`] on I/O failure, format detection failure, or
 /// serialisation error.
-pub fn export_file(input: &Path, opts: &ExportOptions) -> Result<ExportReport, ExportError> {
+pub fn export_file(
+    input: impl Into<PacketSource>,
+    opts: &ExportOptions,
+) -> Result<ExportReport, ExportError> {
     // Resolve format up front so we can return a descriptive error before
     // touching the file system.
     let format = opts

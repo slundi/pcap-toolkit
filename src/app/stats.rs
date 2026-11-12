@@ -1,25 +1,24 @@
 //! `info` and `stats` subcommands: capture summary and per-flow statistics.
 
-use std::path::Path;
-
 use anyhow::{Context, Result};
 use pcap_toolkit::{
-    pcap,
+    pcap::{self, PacketSource},
     stats::{CaptureInfo, StatsCollector},
 };
 
 use crate::cli;
 
-/// Run `info`: print the capture summary.
+/// Run `info`: print the capture summary. An input of `-` reads stdin.
 pub fn run_info(args: &cli::InfoArgs) -> Result<()> {
-    let info = collect_info(&args.input, false)?;
+    let info = collect_info(&PacketSource::from_arg(&args.input), false)?;
     println!("{}", render_info(&info));
     Ok(())
 }
 
 /// Run `stats`: print the capture summary and flow table, or JSON.
+/// An input of `-` reads stdin.
 pub fn run_stats(args: &cli::StatsArgs) -> Result<()> {
-    let info = collect_info(&args.input, args.unidirectional)?;
+    let info = collect_info(&PacketSource::from_arg(&args.input), args.unidirectional)?;
     if args.json {
         println!("{}", stats_to_json(&info)?);
     } else {
@@ -31,13 +30,13 @@ pub fn run_stats(args: &cli::StatsArgs) -> Result<()> {
     Ok(())
 }
 
-/// Stream `path` through a [`StatsCollector`].
-pub fn collect_info(path: &Path, unidirectional: bool) -> Result<CaptureInfo> {
+/// Stream `source` (file or stdin) through a [`StatsCollector`].
+pub fn collect_info(source: &PacketSource, unidirectional: bool) -> Result<CaptureInfo> {
     let mut collector = StatsCollector::new(unidirectional);
-    let iter = pcap::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let iter = pcap::open_source(source).with_context(|| format!("failed to open {source}"))?;
 
     for result in iter {
-        let pkt = result.with_context(|| format!("error reading {}", path.display()))?;
+        let pkt = result.with_context(|| format!("error reading {source}"))?;
         collector.feed(pkt.timestamp_ns, pkt.captured_len, pkt.flow_key);
     }
 
@@ -326,15 +325,17 @@ mod tests {
 
     #[test]
     fn test_collect_info_from_fixture() {
-        let info = collect_info(&fixture("dns_exchange.pcap"), false).unwrap();
+        let source = PacketSource::File(fixture("dns_exchange.pcap"));
+        let info = collect_info(&source, false).unwrap();
         assert!(info.total_packets > 0);
         assert!(info.flow_count() > 0);
     }
 
     #[test]
     fn test_collect_info_missing_file() {
-        let err = collect_info(Path::new("/nonexistent/nope.pcap"), false).unwrap_err();
-        assert!(format!("{err:#}").contains("failed to open"));
+        let source = PacketSource::File("/nonexistent/nope.pcap".into());
+        let err = collect_info(&source, false).unwrap_err();
+        assert!(format!("{err:#}").contains("failed to open /nonexistent/nope.pcap"));
     }
 
     #[test]

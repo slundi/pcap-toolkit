@@ -43,7 +43,7 @@ pcap-toolkit info <INPUT>
 
 | Argument | Description |
 |----------|-------------|
-| `INPUT` | Input PCAP or PCAPng file. |
+| `INPUT` | Input PCAP or PCAPng file, or `-` to read from stdin. |
 
 ### Example
 
@@ -65,7 +65,7 @@ pcap-toolkit stats [-u|--unidirectional] [--json] <INPUT>
 
 | Argument | Description |
 |----------|-------------|
-| `INPUT` | Input PCAP or PCAPng file. |
+| `INPUT` | Input PCAP or PCAPng file, or `-` to read from stdin. |
 
 ### Options
 
@@ -101,7 +101,7 @@ pcap-toolkit sort [OPTIONS] -o <OUTPUT> <INPUT>...
 
 | Argument | Description |
 |----------|-------------|
-| `INPUT...` | One or more input PCAP files. All files are indexed in parallel then merged. **Legacy PCAP only** — PCAPng inputs are rejected. |
+| `INPUT...` | One or more input PCAP files. All files are indexed in parallel then merged. **Legacy PCAP only** — PCAPng inputs are rejected. Stdin (`-`) is not accepted: sorting seeks back into each file. |
 
 ### Output options
 
@@ -193,7 +193,7 @@ pcap-toolkit export [OPTIONS] [-o <PATH>]... <INPUT>
 
 | Argument | Description |
 |----------|-------------|
-| `INPUT` | Input PCAP or PCAPng file. |
+| `INPUT` | Input PCAP or PCAPng file, or `-` to read from stdin. |
 
 ### Output options
 
@@ -209,13 +209,18 @@ Identical to `sort` — see [Filter options](#filter-options) above. All of the
 following are supported: `--proto`, `--src-ip`, `--dst-ip`, `--ip`,
 `--src-port`, `--dst-port`, `--port`, `--flow-id`, `--from`, `--to`,
 `--tcp-flags`, `--min-len`, `--max-len`, `-u`/`--unidirectional`, `--not`,
-`-f`/`--filter`, `--min-flow-packets`.
+`-f`/`--filter`, `--min-flow-packets`. `--min-flow-packets` reads the input
+twice, so it cannot be combined with stdin (`-`).
 
 ### Examples
 
 ```bash
 # Stream JSONL to stdout for piping into jq
 pcap-toolkit export capture.pcap | jq -c 'select(.proto == "tcp")'
+
+# Read the capture from stdin (e.g. live from tcpdump, or decompressed)
+tcpdump -i eth0 -w - -c 1000 | pcap-toolkit export -o live.parquet -
+zstdcat capture.pcap.zst | pcap-toolkit stats --json -
 
 # Parquet with Zstd-compressed payloads
 pcap-toolkit export -o out.parquet --compress-payload capture.pcap
@@ -249,7 +254,7 @@ pcap-toolkit replay [OPTIONS] -i <IFACE>... <INPUT>
 
 | Argument | Description |
 |----------|-------------|
-| `INPUT` | Input PCAP file to replay. |
+| `INPUT` | Input PCAP file to replay, or `-` to read from stdin. `--min-flow-packets` cannot be combined with stdin. |
 
 ### Timing options
 
