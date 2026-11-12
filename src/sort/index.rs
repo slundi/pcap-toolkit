@@ -247,16 +247,20 @@ pub fn sidecar_path(input: &Path) -> PathBuf {
 /// (IPv6 jumbograms top out at 65535 bytes; 9000-byte jumbos are typical).
 pub const MAX_CAPLEN: u32 = 256 * 1024;
 
-/// Seek `file` to `offset`, read the 16-byte PCAP record header to recover
+/// Seek `reader` to `offset`, read the 16-byte PCAP record header to recover
 /// `origlen`, then read `caplen` bytes of packet data.
+///
+/// Generic over any seekable reader (a [`File`], a `BufReader<File>`, an
+/// in-memory `Cursor<Vec<u8>>`, …). Monomorphised, so there is no dynamic
+/// dispatch on the per-packet hot path.
 ///
 /// Returns `(origlen, packet_data)`.
 ///
 /// # Errors
 /// - [`SortError::CaplenTooLarge`] if `caplen` exceeds [`MAX_CAPLEN`].
 /// - [`SortError::Io`] on seek or read failure.
-pub fn read_packet_at(
-    file: &mut File,
+pub fn read_packet_at<R: Read + Seek>(
+    reader: &mut R,
     offset: u64,
     caplen: u32,
     big_endian: bool,
@@ -267,16 +271,16 @@ pub fn read_packet_at(
             max: MAX_CAPLEN,
         });
     }
-    file.seek(SeekFrom::Start(offset))?;
+    reader.seek(SeekFrom::Start(offset))?;
     let mut hdr = [0u8; 16];
-    file.read_exact(&mut hdr)?;
+    reader.read_exact(&mut hdr)?;
     let origlen = if big_endian {
         u32::from_be_bytes(hdr[12..16].try_into().unwrap())
     } else {
         u32::from_le_bytes(hdr[12..16].try_into().unwrap())
     };
     let mut data = vec![0u8; caplen as usize];
-    file.read_exact(&mut data)?;
+    reader.read_exact(&mut data)?;
     Ok((origlen, data))
 }
 
@@ -424,6 +428,49 @@ mod tests {
                 if caplen == MAX_CAPLEN + 1 && max == MAX_CAPLEN
         ));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Build a 16-byte PCAP record header with the given `origlen` followed by
+    /// `payload`, prefixed by `pad` filler bytes.
+    fn record_bytes(pad: usize, origlen: u32, payload: &[u8], big_endian: bool) -> Vec<u8> {
+        let mut buf = vec![0xAAu8; pad];
+        buf.extend_from_slice(&[0u8; 12]); // ts_sec, ts_frac, incl_len (unused here)
+        if big_endian {
+            buf.extend_from_slice(&origlen.to_be_bytes());
+        } else {
+            buf.extend_from_slice(&origlen.to_le_bytes());
+        }
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    #[test]
+    fn test_read_packet_at_in_memory_cursor_le() {
+        let payload = [1u8, 2, 3, 4, 5];
+        let bytes = record_bytes(24, 1500, &payload, false);
+        let mut cursor = std::io::Cursor::new(bytes);
+        let (origlen, data) = read_packet_at(&mut cursor, 24, payload.len() as u32, false).unwrap();
+        assert_eq!(origlen, 1500);
+        assert_eq!(data, payload);
+    }
+
+    #[test]
+    fn test_read_packet_at_in_memory_cursor_be() {
+        let payload = [9u8, 8, 7];
+        let bytes = record_bytes(0, 0x0102_0304, &payload, true);
+        let mut cursor = std::io::Cursor::new(bytes);
+        let (origlen, data) = read_packet_at(&mut cursor, 0, payload.len() as u32, true).unwrap();
+        assert_eq!(origlen, 0x0102_0304);
+        assert_eq!(data, payload);
+    }
+
+    #[test]
+    fn test_read_packet_at_truncated_input_is_io_error() {
+        // Header present but payload shorter than caplen → UnexpectedEof.
+        let bytes = record_bytes(0, 64, &[1, 2], false);
+        let mut cursor = std::io::Cursor::new(bytes);
+        let err = read_packet_at(&mut cursor, 0, 10, false).unwrap_err();
+        assert!(matches!(err, crate::error::SortError::Io(_)));
     }
 
     #[test]
