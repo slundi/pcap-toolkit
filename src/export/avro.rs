@@ -96,7 +96,7 @@ impl AvroSink {
         };
 
         let file = std::fs::File::create(path)?;
-        let writer = Writer::with_codec(&PARSED_SCHEMA, file, codec);
+        let writer = Writer::with_codec(&PARSED_SCHEMA, file, codec)?;
         Ok(Self { writer, count: 0 })
     }
 }

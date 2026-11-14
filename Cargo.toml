@@ -6,11 +6,7 @@ readme = "README.md"
 license = "Apache-2.0"
 repository = "https://codeberg.org/slundi/pcap-toolkit"
 keywords = ["pcap", "network", "packet", "capture", "forensics"]
-categories = [
-    "command-line-utilities",
-    "network-programming",
-    "parser-implementations",
-]
+categories = ["command-line-utilities", "network-programming", "parser-implementations"]
 version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
@@ -36,33 +32,30 @@ targets = [
 
 
 [dependencies]
-anyhow = "1.0.102"
-apache-avro = { version = "0.21", features = ["zstandard"] }
-base64 = "0.22"
-bpaf = "0.9.26"
-chrono = "0.4.44"
-etherparse = "0.20.1"
-parquet = { version = "53", default-features = false, features = [
-    "zstd",
-    "snap",
-] }
+anyhow = "1.0.104"
+apache-avro = { version = "0.22", features = ["zstandard"] }
+base64 = "0.23"
+bpaf = "0.9.29"
+chrono = "0.4.45"
+etherparse = "0.21.0"
+parquet = { version = "60.1", default-features = false, features = ["zstd", "snap"] }
 pcap-parser = "0.17.0"
-rapidhash = "4.4.1"
+rapidhash = "4.5.1"
 rayon = "1.12.0"
 rustc-hash = "2"
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1"
-thiserror = "2.0.18"
+thiserror = "2.0.21"
 toml-span = "0.7.1"
-zstd = "0.13"
+zstd = "0.14"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "bench"
@@ -93,9 +86,21 @@ archives. Exports to JSON, Apache Parquet, and Apache Avro."""
 # `target/release/` is a cargo-deb magic prefix — it rewrites it to the actual
 # --target directory. Listing only this binary excludes the gen_fixtures helper.
 assets = [
-    ["target/release/pcap-toolkit", "usr/bin/", "755"],
-    ["README.md", "usr/share/doc/pcap-toolkit/README.md", "644"],
-    ["CHANGELOG.md", "usr/share/doc/pcap-toolkit/CHANGELOG.md", "644"],
+    [
+        "target/release/pcap-toolkit",
+        "usr/bin/",
+        "755",
+    ],
+    [
+        "README.md",
+        "usr/share/doc/pcap-toolkit/README.md",
+        "644",
+    ],
+    [
+        "CHANGELOG.md",
+        "usr/share/doc/pcap-toolkit/CHANGELOG.md",
+        "644",
+    ],
 ]
 
 # --- Profiles ---
@@ -108,10 +113,10 @@ debug = true
 # Production Release Profile
 # This ensures the Nix-built binary is highly optimized
 [profile.release]
-opt-level = 3     # Max optimizations
-lto = "fat"       # Link Time Optimization (smaller, faster binary)
-codegen-units = 1 # Better optimizations at the cost of compile time
-panic = "abort"   # Removes stack unwinding (smaller binary size)
+opt-level = 3       # Max optimizations
+lto = "fat"         # Link Time Optimization (smaller, faster binary)
+codegen-units = 1   # Better optimizations at the cost of compile time
+panic = "abort"     # Removes stack unwinding (smaller binary size)
 strip = "debuginfo" # Strip debug info but keep symbols so addr2line works on crash reports — useful for a forensic tool
 
 # Profile for Benchmarking
