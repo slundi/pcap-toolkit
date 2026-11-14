@@ -105,6 +105,7 @@ changelog-unreleased:
 tag VERSION:
     git tag -a {{VERSION}} -m "Release {{VERSION}}"
     git push origin {{VERSION}}
+    git push Github {{VERSION}}
     @echo "Pushed tag {{VERSION}}"
 
 # Build a release binary for the current platform
