@@ -1,0 +1,210 @@
+# Release — triggered by pushing a `v*` tag (e.g. `just tag v1.2.3`).
+# Builds fully static musl binaries for Linux (amd64/arm64 on native runners,
+# i686/armv7/armv6 via `cross`), plus Windows and macOS binaries. Linux targets
+# are packaged as tarballs and .deb, then a GitHub release is published with a
+# SHA256SUMS file and git-cliff release notes.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: pcap-toolkit
+
+jobs:
+  preflight:
+    name: Check tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare tag and crate version
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          actual="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          if [[ "$expected" != "$actual" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${actual}"
+            exit 1
+          fi
+
+  build-linux:
+    name: Build ${{ matrix.target }}
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            use_cross: false
+            deb: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            use_cross: false
+            deb: true
+          - target: i686-unknown-linux-musl
+            runner: ubuntu-24.04
+            use_cross: true
+            deb: true
+          - target: armv7-unknown-linux-musleabihf
+            runner: ubuntu-24.04
+            use_cross: true
+            deb: true
+          # ARMv6 (e.g. Raspberry Pi Zero/1): tarball only, its .deb would
+          # clash with the armv7 one (both map to the `armhf` Debian arch).
+          - target: arm-unknown-linux-musleabihf
+            runner: ubuntu-24.04
+            use_cross: true
+            deb: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # musl-gcc compiles the C sources of zstd-sys for native musl builds.
+      - name: Install musl toolchain
+        if: "!matrix.use_cross"
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-deb${{ matrix.use_cross && ',cross' || '' }}
+
+      # Builds the release binary, asserts it is fully static, and writes the .deb to dist/.
+      - name: Build binary and .deb
+        if: "!matrix.use_cross"
+        run: just deb ${{ matrix.target }}
+
+      - name: Build binary (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build .deb (cross)
+        if: matrix.use_cross && matrix.deb
+        run: |
+          mkdir -p dist
+          cargo deb --no-build --no-strip --target ${{ matrix.target }} --output dist/
+
+      - name: Package tarball
+        run: |
+          stage="${BINARY_NAME}-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/${stage}"
+          cp README.md LICENSE CHANGELOG.md "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${stage}/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          rm -rf "dist/${stage}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+          if-no-files-found: error
+
+  build-windows:
+    name: Build x86_64-pc-windows-msvc
+    needs: preflight
+    runs-on: windows-latest
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Build
+        run: cargo build --release --target ${{ env.TARGET }}
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $stage = "$env:BINARY_NAME-$env:GITHUB_REF_NAME-$env:TARGET"
+          New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
+          Copy-Item README.md, LICENSE, CHANGELOG.md, "target/$env:TARGET/release/$env:BINARY_NAME.exe" -Destination "dist/$stage/"
+          Compress-Archive -Path "dist/$stage" -DestinationPath "dist/$stage.zip"
+          Remove-Item -Recurse -Force "dist/$stage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ env.TARGET }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  build-macos:
+    name: Build ${{ matrix.target }}
+    needs: preflight
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package tarball
+        run: |
+          stage="${BINARY_NAME}-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/${stage}"
+          cp README.md LICENSE CHANGELOG.md "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${stage}/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          rm -rf "dist/${stage}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git-cliff needs the full history and tags
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        run: |
+          cd dist
+          sha256sum -- *.tar.gz *.zip *.deb > "${BINARY_NAME}-${GITHUB_REF_NAME}-SHA256SUMS"
+          cat "${BINARY_NAME}-${GITHUB_REF_NAME}-SHA256SUMS"
+
+      - name: Generate release notes
+        id: cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: dist/*
+          prerelease: ${{ contains(github.ref_name, '-') }}

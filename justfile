@@ -159,15 +159,16 @@ package VERSION TARGET:
     rm -rf "$stage"
     echo "  packaged $(ls dist/{{binary_name}}-{{VERSION}}-{{TARGET}}.*)"
 
-# Build a static MUSL amd64 binary and package it into a .deb (requires cargo-deb).
+# Build a static MUSL binary and package it into a .deb (requires cargo-deb).
 # Builds natively against the musl target — the flake devShell wires up the musl
-# cross compiler, so no `cross`/Docker is needed. Run inside `nix develop`.
+# cross compiler for amd64, so no `cross`/Docker is needed. Run inside `nix develop`.
+# Other targets (aarch64) are built by the GitHub release workflow on native runners.
 # cargo-deb reads package metadata from Cargo.toml. The .deb lands in dist/.
-# Usage: just deb
-deb:
+# Usage: just deb [TARGET]
+deb TARGET="x86_64-unknown-linux-musl":
     #!/usr/bin/env bash
     set -euo pipefail
-    target="x86_64-unknown-linux-musl"
+    target="{{TARGET}}"
     mkdir -p dist
     cargo build --release --target "$target"
     just verify-static "$target"
