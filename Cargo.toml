@@ -7,9 +7,9 @@ license = "Apache-2.0"
 repository = "https://codeberg.org/slundi/pcap-toolkit"
 keywords = ["pcap", "network", "packet", "capture", "forensics"]
 categories = ["command-line-utilities", "network-programming", "parser-implementations"]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.96"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -33,7 +33,7 @@ targets = [
 
 [dependencies]
 anyhow = "1.0.104"
-apache-avro = { version = "0.22", features = ["zstandard"] }
+apache-avro = { version = "0.23", features = ["zstandard"] }
 base64 = "0.23"
 bpaf = "0.9.29"
 chrono = "0.4.45"
