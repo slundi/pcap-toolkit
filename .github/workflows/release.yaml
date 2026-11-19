@@ -1,8 +1,12 @@
-# Release — triggered by pushing a `v*` tag (e.g. `just tag v1.2.3`).
+# Release — triggered by pushing a `v*` tag (e.g. `just tag v1.2.3`), or run
+# manually from the Actions tab with an existing tag to (re)build its release.
 # Builds fully static musl binaries for Linux (amd64/arm64 on native runners,
 # i686/armv7/armv6 via `cross`), plus Windows and macOS binaries. Linux targets
 # are packaged as tarballs and .deb, then a GitHub release is published with a
 # SHA256SUMS file and git-cliff release notes.
+#
+# Build steps are inlined (no justfile recipes) so a manual run can rebuild
+# tags created before this workflow existed.
 
 name: Release
 
@@ -10,10 +14,21 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release (e.g. v1.2.3)"
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: pcap-toolkit
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+# Never build the same tag twice concurrently (tag push + manual rerun).
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
 
 jobs:
   preflight:
@@ -21,13 +36,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Compare tag and crate version
         run: |
-          expected="${GITHUB_REF_NAME#v}"
+          expected="${TAG#v}"
           actual="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
           if [[ "$expected" != "$actual" ]]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${actual}"
+            echo "::error::tag ${TAG} does not match Cargo.toml version ${actual}"
             exit 1
           fi
 
@@ -63,6 +80,8 @@ jobs:
             deb: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -75,26 +94,34 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: just,cargo-deb${{ matrix.use_cross && ',cross' || '' }}
+          tool: cargo-deb${{ matrix.use_cross && ',cross' || '' }}
 
-      # Builds the release binary, asserts it is fully static, and writes the .deb to dist/.
-      - name: Build binary and .deb
-        if: "!matrix.use_cross"
-        run: just deb ${{ matrix.target }}
+      - name: Build
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }}
 
-      - name: Build binary (cross)
-        if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }}
+      # Same check as `just verify-static`: no ELF interpreter, no NEEDED libraries.
+      - name: Check binary is fully static
+        run: |
+          bin="target/${{ matrix.target }}/release/${BINARY_NAME}"
+          if readelf -l "$bin" | grep -q INTERP || readelf -d "$bin" 2>/dev/null | grep -q NEEDED; then
+            echo "::error::${bin} is dynamically linked, expected a fully static musl build"
+            exit 1
+          fi
+          # Only native builds can be executed on the runner.
+          if [[ "${{ matrix.use_cross }}" == "false" ]]; then
+            "$bin" --version
+          fi
 
-      - name: Build .deb (cross)
-        if: matrix.use_cross && matrix.deb
+      # --no-build: package the binary built above; --no-strip: keep symbols for addr2line.
+      - name: Build .deb
+        if: matrix.deb
         run: |
           mkdir -p dist
           cargo deb --no-build --no-strip --target ${{ matrix.target }} --output dist/
 
       - name: Package tarball
         run: |
-          stage="${BINARY_NAME}-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          stage="${BINARY_NAME}-${TAG}-${{ matrix.target }}"
           mkdir -p "dist/${stage}"
           cp README.md LICENSE CHANGELOG.md "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${stage}/"
           tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
@@ -116,6 +143,8 @@ jobs:
       TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -127,7 +156,7 @@ jobs:
       - name: Package zip
         shell: pwsh
         run: |
-          $stage = "$env:BINARY_NAME-$env:GITHUB_REF_NAME-$env:TARGET"
+          $stage = "$env:BINARY_NAME-$env:TAG-$env:TARGET"
           New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
           Copy-Item README.md, LICENSE, CHANGELOG.md, "target/$env:TARGET/release/$env:BINARY_NAME.exe" -Destination "dist/$stage/"
           Compress-Archive -Path "dist/$stage" -DestinationPath "dist/$stage.zip"
@@ -151,6 +180,8 @@ jobs:
           - aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -161,7 +192,7 @@ jobs:
 
       - name: Package tarball
         run: |
-          stage="${BINARY_NAME}-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          stage="${BINARY_NAME}-${TAG}-${{ matrix.target }}"
           mkdir -p "dist/${stage}"
           cp README.md LICENSE CHANGELOG.md "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${stage}/"
           tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
@@ -182,6 +213,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.TAG }}
           fetch-depth: 0 # git-cliff needs the full history and tags
 
       - uses: actions/download-artifact@v4
@@ -192,19 +224,22 @@ jobs:
       - name: Write SHA256SUMS
         run: |
           cd dist
-          sha256sum -- *.tar.gz *.zip *.deb > "${BINARY_NAME}-${GITHUB_REF_NAME}-SHA256SUMS"
-          cat "${BINARY_NAME}-${GITHUB_REF_NAME}-SHA256SUMS"
+          sha256sum -- *.tar.gz *.zip *.deb > "${BINARY_NAME}-${TAG}-SHA256SUMS"
+          cat "${BINARY_NAME}-${TAG}-SHA256SUMS"
 
+      # --current: notes for the checked-out tag, even when rebuilding an older one.
       - name: Generate release notes
         id: cliff
         uses: orhun/git-cliff-action@v4
         with:
-          args: --latest --strip header
+          args: --current --strip header
         env:
           OUTPUT: RELEASE_NOTES.md
 
+      # On a rerun the existing release is updated and same-named assets are replaced.
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           body_path: RELEASE_NOTES.md
           files: dist/*
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.TAG, '-') }}
