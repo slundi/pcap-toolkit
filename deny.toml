@@ -1,14 +1,19 @@
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
-unmaintained = "warn"
+# Vulnerabilities are always denied (cargo-deny >= 0.16 has no switch for it).
+# Unmaintained/unsound advisories only fail for direct dependencies.
+unmaintained = "workspace"
+unsound = "workspace"
 yanked = "warn"
-notice = "warn"
-ignore = []
+ignore = [
+  # chrono is unmaintained but still pulled in by parquet; revisit (jiff) once
+  # parquet moves off it.
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, transitively required by parquet" },
+]
 
 [licenses]
-unlicensed = "deny"
+# Crates without a recognised license are always rejected.
 # Adjust this list to match the licenses your project accepts.
 allow = [
   "MIT",
@@ -16,6 +21,7 @@ allow = [
   "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  "CC0-1.0",
   "ISC",
   "Unicode-DFS-2016",
   "Unicode-3.0",

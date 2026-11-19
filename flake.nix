@@ -65,6 +65,10 @@
         CC_x86_64_unknown_linux_musl = muslCcBin;
         AR_x86_64_unknown_linux_musl = muslArBin;
 
+        # Faster linker for native glibc builds. Set here rather than in
+        # .cargo/config.toml so environments without mold (CI) still link.
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
+
         buildInputs = with pkgs; [
           rustToolchain
           cargo-dist
@@ -82,7 +86,7 @@
           just # Command runner
           bacon # Background checker (cargo check/clippy/test on save)
           git-cliff # Changelog generator from conventional commits
-          mold # Fast linker (referenced in .cargo/config.toml)
+          mold # Fast linker (enabled via CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS)
           nil # Nix language server (referenced in .vscode/settings.json)
           jq # JSON processor (used by the Codeberg release recipe in the justfile)
           zip # Used by the Codeberg release recipe to package windows artifacts

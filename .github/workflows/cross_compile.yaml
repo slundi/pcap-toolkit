@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  BINARY_NAME: RatioUp
+  BINARY_NAME: pcap-toolkit
 
 jobs:
   # Linux builds using cross for ARM targets
