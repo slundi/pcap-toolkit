@@ -167,12 +167,24 @@ CLI flags take precedence over the config file. The full TOML schema is document
 
 ## Installation
 
-One-liner (Linux / macOS / WSL):
+One-liner (Linux / macOS / WSL), installs a static binary to `~/.local/bin`:
 
 ```sh
 curl -fsSL https://codeberg.org/slundi/pcap-toolkit/raw/branch/master/install.sh | bash
 ```
 
-`cargo install pcap-toolkit`, Nix, and source builds are also supported.
-See [docs/Install.md](docs/Install.md) for all install methods, options, and
-supported platforms.
+Debian / Ubuntu, as an apt-managed `.deb`:
+
+```sh
+curl -fsSL https://codeberg.org/slundi/pcap-toolkit/raw/branch/master/install.sh | bash -s -- --deb
+```
+
+Pre-built Linux binaries cover x86_64, aarch64, i686, ARMv7 and ARMv6
+(Raspberry Pi), and are fully static, so they run on any distribution. Archives,
+`.deb` packages and checksums are on the
+[Codeberg releases page](https://codeberg.org/slundi/pcap-toolkit/releases)
+(mirrored on [GitHub](https://github.com/slundi/pcap-toolkit/releases)).
+
+`cargo install pcap-toolkit`, Docker, Nix, and source builds are also supported.
+See [docs/Install.md](docs/Install.md) for all install methods, options
+(`--system`, `--prefix`, `--version`), and supported platforms.

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # pcap-toolkit installer
 #
-# Downloads a release binary from Codeberg for the current platform and
-# installs it. Defaults to a user-local install (~/.local/bin).
+# Downloads a release binary for the current platform and installs it.
+# Defaults to a user-local install (~/.local/bin). Assets are fetched from
+# Codeberg first, then from the GitHub mirror.
 #
 #   curl -fsSL https://codeberg.org/slundi/pcap-toolkit/raw/branch/master/install.sh | bash
 #   curl -fsSL https://codeberg.org/slundi/pcap-toolkit/raw/branch/master/install.sh | bash -s -- --system
+#   curl -fsSL https://codeberg.org/slundi/pcap-toolkit/raw/branch/master/install.sh | bash -s -- --deb
 #   curl -fsSL https://codeberg.org/slundi/pcap-toolkit/raw/branch/master/install.sh | bash -s -- --version v0.2.0
 set -euo pipefail
 
@@ -13,6 +15,14 @@ OWNER="slundi"
 REPO="pcap-toolkit"
 BIN="pcap-toolkit"
 API="https://codeberg.org/api/v1/repos/${OWNER}/${REPO}"
+GITHUB_API="https://api.github.com/repos/${OWNER}/${REPO}"
+
+# Release download bases, tried in order. Both forges get the same assets from
+# `just release`; GitHub may additionally carry macOS builds.
+MIRRORS=(
+    "https://codeberg.org/${OWNER}/${REPO}/releases/download"
+    "https://github.com/${OWNER}/${REPO}/releases/download"
+)
 
 VERSION=""
 PREFIX=""
@@ -20,11 +30,12 @@ MODE="user"
 
 usage() {
     cat <<EOF
-Usage: install.sh [--user | --system | --prefix DIR] [--version vX.Y.Z]
+Usage: install.sh [--user | --system | --prefix DIR | --deb] [--version vX.Y.Z]
 
   --user             Install to \$HOME/.local/bin (default; no sudo)
   --system           Install to /usr/local/bin (uses sudo if needed)
   --prefix DIR       Install the binary into DIR
+  --deb              Install the .deb package with apt (Debian/Ubuntu; uses sudo)
   --version vX.Y.Z   Install a specific release tag instead of the latest
   -h, --help         Show this help
 EOF
@@ -35,6 +46,7 @@ while [[ $# -gt 0 ]]; do
         --user)    MODE="user"; shift ;;
         --system)  MODE="system"; shift ;;
         --prefix)  MODE="prefix"; PREFIX="${2:?--prefix needs a directory}"; shift 2 ;;
+        --deb)     MODE="deb"; shift ;;
         --version) VERSION="${2:?--version needs a tag}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -44,7 +56,7 @@ done
 case "$MODE" in
     user)   PREFIX="${HOME}/.local/bin" ;;
     system) PREFIX="/usr/local/bin" ;;
-    prefix) : ;;
+    prefix|deb) : ;;
 esac
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "error: '$1' is required but not installed" >&2; exit 1; }; }
@@ -52,14 +64,30 @@ need curl
 need tar
 need uname
 
+# Run a command as root: directly when already root (e.g. in a container
+# without sudo), through sudo otherwise.
+as_root() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        "$@"
+    else
+        need sudo
+        sudo "$@"
+    fi
+}
+
 # --- Detect platform -> Rust target triple matching release artifacts ---
 os="$(uname -s)"
 arch="$(uname -m)"
 case "$os" in
     Linux)
+        # All Linux builds are fully static musl binaries, so only the CPU
+        # matters (a 32-bit userland on a 64-bit kernel runs the 64-bit build).
         case "$arch" in
             x86_64|amd64)  target="x86_64-unknown-linux-musl" ;;
             aarch64|arm64) target="aarch64-unknown-linux-musl" ;;
+            i686)          target="i686-unknown-linux-musl" ;;
+            armv7l|armv8l) target="armv7-unknown-linux-musleabihf" ;;
+            armv6l)        target="arm-unknown-linux-musleabihf" ;;
             *) echo "error: unsupported Linux arch: $arch" >&2; exit 1 ;;
         esac
         ext="tar.gz"
@@ -84,33 +112,71 @@ case "$os" in
         ;;
 esac
 
+# --- .deb mode: the package arch follows dpkg, not the kernel ---
+if [[ "$MODE" == "deb" ]]; then
+    if [[ "$os" != "Linux" ]]; then
+        echo "error: --deb is only supported on Debian-based Linux" >&2
+        exit 1
+    fi
+    need dpkg
+    deb_arch="$(dpkg --print-architecture)"
+    case "$deb_arch" in
+        amd64|arm64|i386|armhf) : ;;
+        *) echo "error: no .deb published for '$deb_arch'; run without --deb" >&2; exit 1 ;;
+    esac
+    if [[ "$arch" == "armv6l" ]]; then
+        echo "error: the armhf .deb is built for ARMv7 and won't run on ARMv6; run without --deb" >&2
+        exit 1
+    fi
+fi
+
 # --- Resolve version ---
+latest_tag() {
+    curl -fsSL "$1" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+}
 if [[ -z "$VERSION" ]]; then
     echo "Looking up latest release..."
-    VERSION="$(curl -fsSL "${API}/releases/latest" \
-        | grep -m1 '"tag_name"' \
-        | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+    VERSION="$(latest_tag "${API}/releases/latest" || true)"
+    if [[ -z "$VERSION" ]]; then
+        VERSION="$(latest_tag "${GITHUB_API}/releases/latest" || true)"
+    fi
     if [[ -z "$VERSION" ]]; then
         echo "error: could not determine latest release tag" >&2
         exit 1
     fi
 fi
-echo "Installing ${BIN} ${VERSION} for ${target}"
 
-asset="${BIN}-${VERSION}-${target}.${ext}"
-url="https://codeberg.org/${OWNER}/${REPO}/releases/download/${VERSION}/${asset}"
-sums_url="https://codeberg.org/${OWNER}/${REPO}/releases/download/${VERSION}/${BIN}-${VERSION}-SHA256SUMS"
+if [[ "$MODE" == "deb" ]]; then
+    # cargo-deb names packages <name>_<version>-<revision>_<arch>.deb (revision 1).
+    asset="${BIN}_${VERSION#v}-1_${deb_arch}.deb"
+    echo "Installing ${BIN} ${VERSION} (.deb, ${deb_arch})"
+else
+    asset="${BIN}-${VERSION}-${target}.${ext}"
+    echo "Installing ${BIN} ${VERSION} for ${target}"
+fi
 
 # --- Download + verify ---
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "Downloading ${url}"
-if ! curl -fsSL --retry 3 -o "${tmp}/${asset}" "$url"; then
-    echo "error: download failed. Check that the asset exists for ${VERSION}/${target}." >&2
+base=""
+for mirror in "${MIRRORS[@]}"; do
+    echo "Downloading ${mirror}/${VERSION}/${asset}"
+    if curl -fsL --retry 3 -o "${tmp}/${asset}" "${mirror}/${VERSION}/${asset}"; then
+        base="${mirror}/${VERSION}"
+        break
+    fi
+    echo "  not available there"
+done
+if [[ -z "$base" ]]; then
+    echo "error: ${asset} is not published for ${VERSION}." >&2
+    if [[ "$os" == "Darwin" ]]; then
+        echo "  macOS builds are not attached to every release; use \`cargo install pcap-toolkit\` or Nix instead." >&2
+    fi
     echo "  Browse releases: https://codeberg.org/${OWNER}/${REPO}/releases" >&2
     exit 1
 fi
+sums_url="${base}/${BIN}-${VERSION}-SHA256SUMS"
 
 if curl -fsSL --retry 3 -o "${tmp}/SHA256SUMS" "$sums_url" 2>/dev/null; then
     echo "Verifying checksum..."
@@ -135,6 +201,21 @@ else
     echo "warning: SHA256SUMS not found for this release; skipping verification" >&2
 fi
 
+# --- .deb install: hand the package to apt (falls back to dpkg) ---
+if [[ "$MODE" == "deb" ]]; then
+    # Let apt's unprivileged `_apt` user read the file (avoids a sandbox notice).
+    chmod 755 "$tmp"
+    chmod 644 "${tmp}/${asset}"
+    if command -v apt-get >/dev/null 2>&1; then
+        as_root apt-get install -y "${tmp}/${asset}"
+    else
+        as_root dpkg -i "${tmp}/${asset}"
+    fi
+    echo "✓ Installed: $("/usr/bin/${BIN}" --version 2>/dev/null || echo "/usr/bin/${BIN}")"
+    echo "  Uninstall with: sudo apt remove ${BIN}"
+    exit 0
+fi
+
 # --- Extract ---
 echo "Extracting..."
 if [[ "$ext" == "zip" ]]; then
@@ -155,11 +236,12 @@ fi
 mkdir -p "$PREFIX" 2>/dev/null || true
 dest="${PREFIX}/$(basename "$src_bin")"
 echo "Installing to ${dest}"
-if [[ -w "$PREFIX" ]] || mkdir -p "$PREFIX" 2>/dev/null; then
+if [[ -w "$PREFIX" ]]; then
     install -m 0755 "$src_bin" "$dest"
 else
     echo "  ${PREFIX} not writable; using sudo"
-    sudo install -m 0755 "$src_bin" "$dest"
+    as_root mkdir -p "$PREFIX"
+    as_root install -m 0755 "$src_bin" "$dest"
 fi
 
 # --- Friendly PATH hint for user-mode installs ---
