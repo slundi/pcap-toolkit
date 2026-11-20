@@ -90,6 +90,12 @@
           nil # Nix language server (referenced in .vscode/settings.json)
           jq # JSON processor (used by the Codeberg release recipe in the justfile)
           zip # Used by the Codeberg release recipe to package windows artifacts
+
+          # cross-compiling
+          cargo-zigbuild
+          zig
+
+          github-cli
         ];
 
         # This runs when the shell starts

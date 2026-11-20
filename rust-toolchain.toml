@@ -5,14 +5,17 @@ channel = "stable"
 components = [
   "rustfmt",
   "clippy",
-  "rust-src",          # needed by rust-analyzer and many tools (replaces deprecated rust-analysis)
-  "llvm-tools",        # renamed from llvm-tools-preview
+  "rust-src",   # needed by rust-analyzer and many tools (replaces deprecated rust-analysis)
+  "llvm-tools", # renamed from llvm-tools-preview
 ]
-# Add targets here only if your project actually needs them.
-# Uncomment wasm32 for WebAssembly targets, or add others as needed.
+# Release targets cross-built locally with `cargo zigbuild` (see justfile `release_targets`)
 targets = [
   "x86_64-unknown-linux-gnu",
-  "x86_64-unknown-linux-musl", # static amd64 builds, packaged as .deb (see `just deb`)
-  # "wasm32-unknown-unknown",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+  "i686-unknown-linux-musl",
+  "armv7-unknown-linux-musleabihf",
+  "arm-unknown-linux-musleabihf",
+  "x86_64-pc-windows-gnu",
 ]
 profile = "default"

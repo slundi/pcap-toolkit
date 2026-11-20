@@ -1,5 +1,8 @@
-# Release — triggered by pushing a `v*` tag (e.g. `just tag v1.2.3`), or run
-# manually from the Actions tab with an existing tag to (re)build its release.
+# Release — manual only: run it from the Actions tab with an existing tag to
+# (re)build its release. Releases are normally built and published locally by
+# `just release`; this workflow is the fallback, and the only way to get macOS
+# binaries. Running it after `just release` replaces same-named assets and the
+# SHA256SUMS file on the GitHub release with the CI-built ones.
 # Builds fully static musl binaries for Linux (amd64/arm64 on native runners,
 # i686/armv7/armv6 via `cross`), plus Windows and macOS binaries. Linux targets
 # are packaged as tarballs and .deb, then a GitHub release is published with a
@@ -11,9 +14,6 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       tag:

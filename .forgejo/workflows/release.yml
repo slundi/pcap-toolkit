@@ -15,14 +15,18 @@
 # with a dedicated CODEBERG_TOKEN secret if your instance's token lacks scope.
 #
 # Runner: a docker-capable Forgejo Actions runner (same class as docker-release);
-# `cross` and `just docker-smoke` both need a reachable docker daemon.
+# `just docker-smoke` needs a reachable docker daemon.
+#
+# Manual only: `just release` publishes the Codeberg release locally, and a
+# tag-triggered run would race it (both POST the same release). Dispatch it on
+# a tag ref, e.g. to rebuild a release whose local publish failed.
+# NOTE: `just package-all` now cross-builds with `cargo zigbuild`; this image
+# needs zig + cargo-zigbuild + cargo-deb before a dispatch will succeed.
 
 name: release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

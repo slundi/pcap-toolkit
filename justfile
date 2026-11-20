@@ -6,9 +6,21 @@ codeberg_owner := "slundi"
 codeberg_repo := "pcap-toolkit"
 codeberg_api := "https://codeberg.org/api/v1"
 
-# Targets built locally via `cross` for releases.
-# Darwin targets (x86_64/aarch64-apple-darwin) need osxcross and are only built in CI.
-release_targets := "x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu"
+# GitHub release config (publishing needs `gh auth login`)
+github_repo := "slundi/pcap-toolkit"
+
+# Remotes a release tag is pushed to
+release_remotes := "origin Github"
+
+# Targets cross-built locally via `cargo zigbuild` for releases (zig is the C
+# compiler + linker for every target, no containers needed). Each one must also
+# be listed in rust-toolchain.toml. Darwin targets can't be cross-built from
+# Linux here: run the manual GitHub release workflow for those.
+release_targets := "x86_64-unknown-linux-musl aarch64-unknown-linux-musl i686-unknown-linux-musl armv7-unknown-linux-musleabihf arm-unknown-linux-musleabihf x86_64-pc-windows-gnu"
+
+# Linux targets also packaged as .deb. ARMv6 (arm-unknown-linux-musleabihf) is
+# left out: its .deb would clash with the armv7 one (both are Debian `armhf`).
+deb_targets := "x86_64-unknown-linux-musl aarch64-unknown-linux-musl i686-unknown-linux-musl armv7-unknown-linux-musleabihf"
 
 # --- Development ---
 
@@ -104,8 +116,7 @@ changelog-unreleased:
 # Usage: just tag v1.2.3
 tag VERSION:
     git tag -a {{VERSION}} -m "Release {{VERSION}}"
-    git push origin {{VERSION}}
-    git push Github {{VERSION}}
+    for remote in {{release_remotes}}; do git push "$remote" {{VERSION}}; done
     @echo "Pushed tag {{VERSION}}"
 
 # Build a release binary for the current platform
@@ -113,10 +124,10 @@ build-release:
     cargo build --release
 
 # Build a release binary for a specific cross-compilation target
-# Requires `cross` in your PATH (included in flake.nix devShell)
-# Usage: just build-release-cross aarch64-unknown-linux-gnu
+# Requires `cargo-zigbuild` + `zig` (included in flake.nix devShell)
+# Usage: just build-release-cross aarch64-unknown-linux-musl
 build-release-cross TARGET:
-    cross build --release --target {{TARGET}}
+    cargo zigbuild --release --target {{TARGET}}
 
 # Assert a musl release binary is fully static (no ELF interpreter, no NEEDED
 # libraries) and actually executes. Guards against accidentally reintroducing
@@ -132,8 +143,15 @@ verify-static TARGET:
         readelf -d "$bin" 2>/dev/null | grep NEEDED || true
         exit 1
     fi
-    "$bin" --version >/dev/null
-    echo "  ✓ {{TARGET}} is fully static"
+    # Only execute binaries the host CPU can run (x86_64 also runs i686).
+    arch="$(echo {{TARGET}} | cut -d- -f1)"
+    host="$(uname -m)"
+    if [[ "$arch" == "$host" || ( "$arch" == i686 && "$host" == x86_64 ) ]]; then
+        "$bin" --version >/dev/null
+        echo "  ✓ {{TARGET}} is fully static and runs"
+    else
+        echo "  ✓ {{TARGET}} is fully static (foreign arch, not executed)"
+    fi
 
 # Build and package a single release artifact into dist/
 # Usage: just package v1.2.3 x86_64-unknown-linux-musl
@@ -142,8 +160,8 @@ package VERSION TARGET:
     set -euo pipefail
     mkdir -p dist
     echo "Building {{binary_name}} {{VERSION}} for {{TARGET}}..."
-    cross build --release --target {{TARGET}}
-    if [[ "{{TARGET}}" == *-linux-musl ]]; then
+    cargo zigbuild --release --target {{TARGET}}
+    if [[ "{{TARGET}}" == *-linux-musl* ]]; then
         just verify-static {{TARGET}}
     fi
     stage="dist/{{binary_name}}-{{VERSION}}-{{TARGET}}"
@@ -160,58 +178,92 @@ package VERSION TARGET:
     echo "  packaged $(ls dist/{{binary_name}}-{{VERSION}}-{{TARGET}}.*)"
 
 # Build a static MUSL binary and package it into a .deb (requires cargo-deb).
-# Builds natively against the musl target — the flake devShell wires up the musl
-# cross compiler for amd64, so no `cross`/Docker is needed. Run inside `nix develop`.
-# Other targets (aarch64) are built by the GitHub release workflow on native runners.
-# cargo-deb reads package metadata from Cargo.toml. The .deb lands in dist/.
+# Cross-builds with `cargo zigbuild`, so any target in `deb_targets` works from
+# an amd64 host without Docker. Run inside `nix develop`.
+# cargo-deb reads package metadata from Cargo.toml and maps the Rust target to
+# the Debian arch (amd64, arm64, i386, armhf). The .deb lands in dist/.
 # Usage: just deb [TARGET]
 deb TARGET="x86_64-unknown-linux-musl":
     #!/usr/bin/env bash
     set -euo pipefail
     target="{{TARGET}}"
     mkdir -p dist
-    cargo build --release --target "$target"
+    cargo zigbuild --release --target "$target"
     just verify-static "$target"
     # --no-build: package the binary we just built (avoid a redundant rebuild).
     # --no-strip: keep symbols for addr2line on crash reports (see release profile).
-    cargo deb --no-build --no-strip --target "$target" --output dist/
-    echo "  packaged $(ls dist/*.deb | tail -n1)"
+    # cargo-deb prints the path of the generated package on stdout.
+    deb="$(cargo deb --no-build --no-strip --target "$target" --output dist/)"
+    echo "  packaged $deb"
 
 nix-deb:
     nix develop --command just deb
 
-# Build all locally-supported release targets and write SHA256SUMS
+# Build all locally-supported release targets + .debs and write SHA256SUMS
 # Usage: just package-all v1.2.3
 package-all VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
-    rm -f dist/{{binary_name}}-{{VERSION}}-*.tar.gz dist/{{binary_name}}-{{VERSION}}-*.zip dist/{{binary_name}}-{{VERSION}}-SHA256SUMS
+    ver="{{VERSION}}"; ver="${ver#v}"
+    rm -f dist/{{binary_name}}-{{VERSION}}-* dist/{{binary_name}}_"${ver}"-*.deb
     for target in {{release_targets}}; do
         just package {{VERSION}} "$target"
     done
-    (cd dist && sha256sum {{binary_name}}-{{VERSION}}-*.tar.gz {{binary_name}}-{{VERSION}}-*.zip 2>/dev/null \
-        > {{binary_name}}-{{VERSION}}-SHA256SUMS)
+    for target in {{deb_targets}}; do
+        just deb "$target"
+    done
+    (cd dist && sha256sum {{binary_name}}-{{VERSION}}-*.tar.gz {{binary_name}}-{{VERSION}}-*.zip \
+        {{binary_name}}_"${ver}"-*.deb > {{binary_name}}-{{VERSION}}-SHA256SUMS)
     echo "Artifacts:"
-    ls -1 dist/{{binary_name}}-{{VERSION}}-*
+    just _assets {{VERSION}}
 
-# Full release: validate, build all targets, tag + push, create Codeberg release, upload assets.
+# Full release: validate, build all targets, tag + push to every remote, then
+# create the Codeberg and GitHub releases with the same assets.
 # Requires CODEBERG_TOKEN env var with write:repository scope
-#   (Codeberg → Settings → Applications → Generate New Token).
+#   (Codeberg → Settings → Applications → Generate New Token)
+# and an authenticated GitHub CLI (`gh auth login`).
+# macOS binaries are not built locally: afterwards, run the GitHub "Release"
+# workflow by hand if you want them on the GitHub release.
 # Usage: just release v1.2.3
 release VERSION: (_release-preflight VERSION) (package-all VERSION)
-    just docker-smoke {{VERSION}}
+    @if command -v docker >/dev/null; then just docker-smoke {{VERSION}}; else echo "docker not found, skipping docker-smoke"; fi
     just _release-tag-push {{VERSION}}
     just _release-codeberg {{VERSION}}
-    @echo "✓ Release {{VERSION}} published: https://codeberg.org/{{codeberg_owner}}/{{codeberg_repo}}/releases/tag/{{VERSION}}"
+    just _release-github {{VERSION}}
+    @echo "✓ Release {{VERSION}} published:"
+    @echo "  https://codeberg.org/{{codeberg_owner}}/{{codeberg_repo}}/releases/tag/{{VERSION}}"
+    @echo "  https://github.com/{{github_repo}}/releases/tag/{{VERSION}}"
 
 # --- Internal release helpers (prefixed _ to keep `just --list` clean) ---
+
+# List the release assets for VERSION in dist/ (archives, .debs, SHA256SUMS)
+_assets VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    shopt -s nullglob
+    ver="{{VERSION}}"; ver="${ver#v}"
+    printf '%s\n' dist/{{binary_name}}-{{VERSION}}-* dist/{{binary_name}}_"${ver}"-*.deb
 
 _release-preflight VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
+    for tool in cargo-zigbuild zig cargo-deb gh jq zip git-cliff; do
+        if ! command -v "$tool" >/dev/null; then
+            echo "error: $tool not found — run inside \`nix develop\`" >&2
+            exit 1
+        fi
+    done
     if [[ -z "${CODEBERG_TOKEN:-}" ]]; then
         echo "error: CODEBERG_TOKEN not set" >&2
         echo "  Create one at https://codeberg.org/user/settings/applications (scope: write:repository)" >&2
+        exit 1
+    fi
+    if ! gh auth status --hostname github.com >/dev/null 2>&1; then
+        echo "error: GitHub CLI is not authenticated — run \`gh auth login\`" >&2
+        exit 1
+    fi
+    if git rev-parse -q --verify "refs/tags/{{VERSION}}" >/dev/null; then
+        echo "error: tag {{VERSION}} already exists" >&2
         exit 1
     fi
     if ! git diff-index --quiet HEAD --; then
@@ -226,9 +278,11 @@ _release-preflight VERSION:
         exit 1
     fi
 
+# --atomic: the current branch and the tag land together on each remote, so a
+# tag never points at a commit the remote branch doesn't have.
 _release-tag-push VERSION:
     git tag -a {{VERSION}} -m "Release {{VERSION}}"
-    git push origin {{VERSION}}
+    for remote in {{release_remotes}}; do git push --atomic "$remote" HEAD {{VERSION}}; done
 
 # Stage Linux release binaries next to the Dockerfile so `docker build` works.
 # Pulls from local dist/ if `just package-all VERSION` has been run; otherwise
@@ -283,10 +337,25 @@ _release-codeberg VERSION:
         -d "$payload" "$api/releases")"
     release_id="$(echo "$response" | jq -r '.id')"
     echo "  release id: $release_id"
-    for f in dist/{{binary_name}}-{{VERSION}}-*; do
+    mapfile -t assets < <(just _assets {{VERSION}})
+    for f in "${assets[@]}"; do
         name="$(basename "$f")"
         echo "  uploading $name"
         curl -sf -X POST -H "$auth" \
             -F "attachment=@$f" \
             "$api/releases/$release_id/assets?name=$name" > /dev/null
     done
+
+# --verify-tag: fail instead of letting gh create the tag on GitHub.
+_release-github VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mapfile -t assets < <(just _assets {{VERSION}})
+    notes="$(mktemp)"
+    trap 'rm -f "$notes"' EXIT
+    git cliff --latest --strip header > "$notes" 2>/dev/null || echo 'See CHANGELOG.md for details.' > "$notes"
+    prerelease=()
+    if [[ "{{VERSION}}" == *-* ]]; then prerelease=(--prerelease); fi
+    echo "Creating GitHub release..."
+    gh release create {{VERSION}} "${assets[@]}" --repo {{github_repo}} --title {{VERSION}} \
+        --notes-file "$notes" --verify-tag "${prerelease[@]}"
